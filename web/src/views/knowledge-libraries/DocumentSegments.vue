@@ -4,9 +4,11 @@ import DOMPurify from 'dompurify'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Back, Plus, Search, Close, View, Top, Bottom, Edit, Delete } from '@element-plus/icons-vue'
+import { Back, Search, Close, View, Top, Bottom, Edit, Delete } from '@element-plus/icons-vue'
 import { listDocumentLibraries, listLibraryDocuments, getLibraryChunks, saveLibraryChunk, deleteLibraryChunk, getLibraryDocumentPreviewUrl, type DocumentLibrary, type LibraryDocument, type LibraryChunk, type LibraryChunkInput } from '@/api/document-library'
+import { rewriteChunkImages } from '@/utils/chunk-images'
 import { useTabsStore } from '@/stores/tabs'
+import ParsedContentView from '@/components/common/ParsedContentView.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,18 +28,48 @@ const loading = ref(false)
 const busy = ref(false)
 const error = ref('')
 const keyword = ref('')
-const renderChunk = (content: string) => DOMPurify.sanitize(marked.parse(content, {async: false}) as string, {FORBID_TAGS: ['img', 'iframe', 'video', 'audio']})
+// 分段渲染：允许 img（MinerU 图片经 rewriteChunkImages 改写为带鉴权代理 URL）
+const renderChunk = (content: string) => highlightKeyword(rewriteChunkImages(
+  DOMPurify.sanitize(marked.parse(content, {async: false}) as string, {FORBID_TAGS: ['iframe', 'video', 'audio']}),
+  libId, docId))
 
-// 源文件预览面板
+// 搜索命中高亮：只处理渲染后 HTML 的文本节点（不碰标签/属性），关键词包 <mark>
+const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+function highlightKeyword(html: string): string {
+  const kw = keyword.value.trim()
+  if (!kw) return html
+  const escapedKw = escapeHtml(kw)
+  const re = new RegExp(`(${escapedKw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
+  const lower = escapedKw.toLowerCase()
+  const container = document.createElement('div')
+  container.innerHTML = html
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  const nodes: Text[] = []
+  while (walker.nextNode()) {
+    if (escapeHtml(walker.currentNode.nodeValue || '').toLowerCase().includes(lower))
+      nodes.push(walker.currentNode as Text)
+  }
+  for (const node of nodes) {
+    const span = document.createElement('span')
+    span.innerHTML = escapeHtml(node.nodeValue || '').replace(re, '<mark>$1</mark>')
+    node.parentNode?.replaceChild(span, node)
+  }
+  return container.innerHTML
+}
+
+// 源文件预览面板 / 解析原文面板（右侧，二者互斥避免三栏挤压）
 const previewVisible = ref(false)
 const previewUrl = ref('')
 const previewLoading = ref(false)
+const parsedVisible = ref(false)
+const sidePanelVisible = computed(() => previewVisible.value || parsedVisible.value)
 async function togglePreview() {
   if (previewVisible.value) { previewVisible.value = false; return }
   previewLoading.value = true
   try {
     const res = await getLibraryDocumentPreviewUrl(libId, docId)
     previewUrl.value = res.preview_url
+    parsedVisible.value = false
     previewVisible.value = true
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || e.message || '获取预览地址失败')
@@ -45,8 +77,17 @@ async function togglePreview() {
     previewLoading.value = false
   }
 }
+function toggleParsed() {
+  parsedVisible.value = !parsedVisible.value
+  if (parsedVisible.value) previewVisible.value = false
+}
 function openPreviewInNewTab() {
   if (previewUrl.value) window.open(previewUrl.value, '_blank')
+}
+// 解析原文新页签查看（路由导航自动开页签，页面从 sessionStorage 取文档名）
+function goParsedContent() {
+  if (docName.value) sessionStorage.setItem(`doc_name:${docId}`, docName.value)
+  router.push({ path: `/apply/knowledge-libraries/${libId}/documents/${docId}/parsed-content` })
 }
 
 // 检索测试：新页签打开
@@ -140,7 +181,7 @@ async function exportChunks() {
       if (!result.chunks.length) throw new Error('分段数量发生变化，请刷新后重试导出')
     }
     const meta = doc.value || {id: docId, name: docName.value}
-    download(new Blob([JSON.stringify({schema_version: 1, document: meta, processing: lib.value?.config, chunks: all}, null, 2)], {type: 'application/json'}), `${meta.name}.chunks.json`)
+    download(new Blob([JSON.stringify({schema_version: 1, document: meta, processing: lib.value?.config?.processing, chunks: all}, null, 2)], {type: 'application/json'}), `${meta.name}.chunks.json`)
   } catch (e: any) { error.value = e?.response?.data?.detail || e.message || '导出失败' }
   finally { busy.value = false }
 }
@@ -149,20 +190,22 @@ onMounted(() => { loadMeta(); load() })
 <template>
   <div class="kge-page document-segments">
     <el-alert v-if="error" :title="String(error)" type="error" show-icon @close="error = ''" />
-    <div class="content" :class="{'with-preview': previewVisible}" v-loading="loading">
+    <div class="content" :class="{'with-preview': sidePanelVisible}" v-loading="loading">
       <!-- 左侧：分段列表 -->
       <div class="main-col">
         <div class="toolbar">
-          <el-button link :icon="Back" @click="router.push({path: '/apply/knowledge-libraries', query: {libId: String(libId)}})">返回知识库</el-button>
+          <el-button link :icon="Back" @click="router.push({path: '/apply/knowledge-libraries', query: {libId: String(libId)}})">返回</el-button>
           <span class="doc-name" :title="docName">{{ docName }}</span>
           <el-tag v-if="doc" :type="doc.status === 'COMPLETED' ? 'success' : doc.status === 'FAILED' ? 'danger' : 'info'">{{ statusLabels[doc.status] || doc.status }}</el-tag>
           <span class="hint">共 {{ total }} 个分段</span>
           <div class="toolbar-spacer" />
           <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索分段内容" clearable style="width: 220px" @change="page = 1; load()" />
-          <el-button type="primary" :icon="Plus" :disabled="busy" @click="editChunk()">新增分段</el-button>
           <el-button :loading="busy" @click="exportChunks">导出全部分段</el-button>
           <el-button :icon="View" :type="previewVisible ? 'primary' : ''" :loading="previewLoading" @click="togglePreview">
             {{ previewVisible ? '关闭源文件' : '查看源文件' }}
+          </el-button>
+          <el-button :icon="View" :type="parsedVisible ? 'primary' : ''" @click="toggleParsed">
+            {{ parsedVisible ? '隐藏解析原文' : '查看解析原文' }}
           </el-button>
           <el-button :icon="Search" @click="goRetrievalTest">检索测试</el-button>
         </div>
@@ -216,6 +259,23 @@ onMounted(() => { loadMeta(); load() })
           <el-empty v-else description="加载预览中..." />
         </div>
       </aside>
+
+      <!-- 右侧：解析原文面板（JSON 内容格式化展示，markdown 按内容渲染） -->
+      <aside v-if="parsedVisible" class="preview-col">
+        <header class="preview-header">
+          <div class="preview-title">
+            <el-tag size="small">解析原文</el-tag>
+            <span class="preview-filename" :title="docName">{{ docName }}</span>
+          </div>
+          <div class="preview-actions">
+            <el-button link type="primary" @click="goParsedContent">前往新页面查看 →</el-button>
+            <el-button link :icon="Close" aria-label="隐藏解析原文" @click="parsedVisible = false" />
+          </div>
+        </header>
+        <div class="preview-body">
+          <ParsedContentView :lib-id="libId" :doc-id="docId" />
+        </div>
+      </aside>
     </div>
     <el-dialog v-model="chunkEdit" :title="chunkDialogTitle" width="min(680px, 94vw)" :close-on-click-modal="false">
       <el-form label-position="top"><el-form-item label="分段正文" required><el-input v-model="chunkForm.content" type="textarea" :rows="12" /></el-form-item></el-form>
@@ -256,8 +316,10 @@ onMounted(() => { loadMeta(); load() })
 .chunk-actions .el-button { padding: 6px; }
 .chunk-actions .el-button .el-icon { font-size: 16px; }
 .chunk-content { overflow-wrap: anywhere; overflow: auto; line-height: 1.7; }
+.chunk-content :deep(mark) { background: var(--el-color-warning-light-8, #f3d19e); color: inherit; padding: 0 2px; border-radius: 2px; }
 .chunk-content :deep(table) { border-collapse: collapse; width: 100%; }
 .chunk-content :deep(td), .chunk-content :deep(th) { border: 1px solid var(--el-border-color-lighter); padding: 6px; }
+.chunk-content :deep(img) { max-width: 100%; border-radius: 4px; margin: 6px 0; display: block; }
 .el-pagination { margin-top: 16px; justify-content: flex-end; }
 
 /* 右侧预览面板 */

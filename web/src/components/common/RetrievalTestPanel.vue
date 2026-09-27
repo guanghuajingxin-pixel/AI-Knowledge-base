@@ -7,11 +7,14 @@ import DOMPurify from 'dompurify'
 import { searchTest } from '@/api/search'
 import { testKnowledgeRetrieval, type RetrievalTestHit } from '@/api/knowledge-library'
 import RetrievalSettingsDialog, { type RetrievalSettings } from './RetrievalSettingsDialog.vue'
+import { rewriteChunkImages } from '@/utils/chunk-images'
 
-// Markdown 渲染：与分段预览保持一致，禁用 img/iframe 等富媒体
-const renderMarkdown = (content: string) =>
-  DOMPurify.sanitize(marked.parse(content, { async: false }) as string,
-    { FORBID_TAGS: ['img', 'iframe', 'video', 'audio'] })
+// Markdown 渲染：允许 img（文档库命中分段里的 MinerU 图片按命中文档改写为代理 URL）
+const renderMarkdown = (content: string, documentId?: string) => {
+  const html = DOMPurify.sanitize(marked.parse(content, { async: false }) as string,
+    { FORBID_TAGS: ['iframe', 'video', 'audio'] })
+  return props.libraryId && documentId ? rewriteChunkImages(html, props.libraryId, documentId) : html
+}
 
 const props = defineProps<{
   /** 后端：local=本地知识库 ES 检索；library=知识库抽象层（Dify/RAGFlow）检索 */
@@ -346,9 +349,9 @@ onMounted(loadRecords)
                 <div v-if="scoreFormula(hit)" class="rtp-card-hint">{{ scoreFormula(hit) }}</div>
                 <details v-if="hit.matched_content && hit.matched_content !== hit.text">
                   <summary>查看实际评分的命中子分段</summary>
-                  <div class="rtp-hit-content rtp-md" v-html="renderMarkdown(hit.matched_content)" />
+                  <div class="rtp-hit-content rtp-md" v-html="renderMarkdown(hit.matched_content, hit.document_id)" />
                 </details>
-                <div class="rtp-hit-content rtp-md" v-html="renderMarkdown(hit.text)" />
+                <div class="rtp-hit-content rtp-md" v-html="renderMarkdown(hit.text, hit.document_id)" />
                 <div class="rtp-hit-meta">
                   <el-icon><document /></el-icon>
                   <span class="rtp-hit-doc">{{ hit.document_title }}</span>
@@ -533,6 +536,7 @@ onMounted(loadRecords)
   margin: 6px 0; padding: 4px 12px; border-left: 3px solid var(--el-border-color);
   color: var(--el-text-color-secondary); background: var(--el-fill-color-lighter);
 }
+.rtp-md :deep(img) { max-width: 100%; border-radius: 4px; margin: 6px 0; display: block; }
 .rtp-md :deep(a) { color: var(--el-color-primary); text-decoration: none; }
 .rtp-md :deep(a:hover) { text-decoration: underline; }
 .rtp-md :deep(hr) { border: none; border-top: 1px solid var(--el-border-color-lighter); margin: 8px 0; }

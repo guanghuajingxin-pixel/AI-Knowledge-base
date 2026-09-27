@@ -136,8 +136,15 @@ interface QueueJob {
 // ============================================================
 const CONFIG_KEY = 'kge:mineru_config_v1'
 const DEFAULT_BASE = 'http://127.0.0.1:8010'
+// 默认引擎：cloud。生产环境（如 10.10.166.2）本地 mineru-kit 通常未部署，
+// 默认 local 会让首次进入页面的健康检查/上传全 502；改为 cloud 后，未显式配置
+// 过的用户直接走 SaaS（Key 由「模型配置」页 mineru_api_key 提供，前端不经手）。
+const DEFAULT_ENGINE: 'local' | 'cloud' = 'cloud'
 
-const config = reactive({ baseUrl: DEFAULT_BASE, engine: 'local' as 'local' | 'cloud' })
+const config = reactive<{ baseUrl: string; engine: 'local' | 'cloud' }>({
+  baseUrl: DEFAULT_BASE,
+  engine: DEFAULT_ENGINE,
+})
 
 function loadConfig() {
   try {
@@ -145,7 +152,8 @@ function loadConfig() {
     if (raw) {
       const parsed = JSON.parse(raw) as { baseUrl?: string; engine?: string }
       config.baseUrl = parsed.baseUrl?.trim() || DEFAULT_BASE
-      config.engine = parsed.engine === 'cloud' ? 'cloud' : 'local'
+      // 只有显式存过 'local' 才回到本地引擎；其余（含历史默认值缺失）走 cloud
+      config.engine = parsed.engine === 'local' ? 'local' : 'cloud'
     }
   } catch {
     /* 忽略损坏的本地缓存 */

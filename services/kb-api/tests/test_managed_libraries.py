@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -61,6 +61,40 @@ class EngineContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lib.chunk_method, 'naive')
         self.assertEqual(lib.delimiter, '\n。！？；')
         self.assertEqual(lib.chunk_token_num, 512)
+        self.assertEqual(lib.strategy, 'auto')  # 策略视图缺省 auto（旧扁平载荷兼容）
+
+    def test_library_in_strategy_view(self):
+        """库级索引设置：strategy/enhancements/type_rules 与 processing 分开存储到 engine_config。"""
+        lib = routes.LibraryIn(name='知识库', chunk_method='naive', strategy='by_file_type',
+                               enhancements={'include_filename': True},
+                               type_rules={'pdf': {'strategy': 'custom', 'method': 'paper', 'chunk_token_num': 300,
+                                                   'delimiter': '。', 'children_delimiter': '\n'}})
+        cfg = routes._library_engine_config(lib)
+        self.assertEqual(cfg['strategy'], 'by_file_type')
+        self.assertEqual(cfg['enhancements'], {'include_filename': True})
+        self.assertEqual(cfg['type_rules']['pdf']['method'], 'paper')
+        self.assertNotIn('strategy', cfg['processing'])
+        self.assertNotIn('name', cfg['processing'])
+        self.assertEqual(cfg['processing']['chunk_method'], 'naive')
+        with self.assertRaises(ValidationError):
+            routes.LibraryIn(name='知识库', strategy='unknown')
+
+    def test_lib_out_full_config_and_legacy_derivation(self):
+        """lib_out 返回与文档级对齐的全量配置；旧库未存 strategy 时按 processing 推导。"""
+        lib = SimpleNamespace(id=1, name='库', description='', enabled=True, creator='u', created_at=None,
+                              engine_config={'processing': {'chunk_method': 'naive'}, 'strategy': 'by_file_type',
+                                             'enhancements': {'auto_summary': True}, 'type_rules': {'pdf': {}}})
+        cfg = routes.lib_out(lib)['config']
+        self.assertEqual(cfg['strategy'], 'by_file_type')
+        self.assertEqual(cfg['enhancements'], {'auto_summary': True})
+        self.assertEqual(cfg['type_rules'], {'pdf': {}})
+        self.assertEqual(cfg['processing']['chunk_method'], 'naive')
+        legacy = lambda p: routes.lib_out(SimpleNamespace(id=1, name='库', description='', enabled=True,
+                                                          creator='u', created_at=None,
+                                                          engine_config={'processing': p}))['config']['strategy']
+        self.assertEqual(legacy({'chunk_method': 'naive', 'enable_children': True}), 'parent_child')
+        self.assertEqual(legacy({'chunk_method': 'auto'}), 'auto')
+        self.assertEqual(legacy({'chunk_method': 'naive'}), 'custom')
 
     async def test_no_edit_while_parsing(self):
         lib = SimpleNamespace(dataset_id='ds')
@@ -157,12 +191,81 @@ class MinerULocalTests(unittest.TestCase):
         self.assertEqual(len(pieces), 1)
         self.assertEqual(pieces[0]['children'], ['第一行内容', '第二行内容', '第三行内容'])
 
+    def test_preprocess_replace_whitespace(self):
+        md = '第一段。  \n\n\n\n第二段。\t\t第三段。'
+        pieces = chunk_markdown(md, {'chunk_method': 'one', 'replace_whitespace': True})
+        content = pieces[0]['content']
+        self.assertNotRegex(content, r'\n{3,}')      # 3+ 连续换行折叠为 2 个
+        self.assertNotRegex(content, r' {2,}|\t{2,}')  # 2+ 连续空格/制表符折叠为单空格
+        self.assertIn('\n\n', content)               # 换行结构保留（不影响标题识别）
+
+    def test_preprocess_replace_whitespace_off_keeps_raw(self):
+        md = '第一段。  \n\n\n\n第二段。'
+        pieces = chunk_markdown(md, {'chunk_method': 'one'})
+        self.assertIn('\n\n\n\n', pieces[0]['content'])
+
+    def test_preprocess_remove_urls_emails(self):
+        md = ('联系 admin@example.com 或访问 https://example.com/doc?a=1 获取详情。\n\n'
+              '![图片](https://cdn.example.com/a.png) 与 [文档](https://docs.example.com/x) 保留。')
+        pieces = chunk_markdown(md, {'chunk_method': 'one', 'remove_urls_emails': True})
+        content = pieces[0]['content']
+        self.assertNotIn('admin@example.com', content)             # 邮箱删除
+        self.assertNotIn('https://example.com/doc', content)       # 裸 URL 删除
+        self.assertIn('![图片](https://cdn.example.com/a.png)', content)  # markdown 图片受保护
+        self.assertIn('[文档](https://docs.example.com/x)', content)      # markdown 链接受保护
+
+    def test_overlap_carries_tail_sentences(self):
+        text = ''.join(f'第{i}句话讲的是内容{"甲" if i % 2 else "乙"}。' for i in range(40))
+        base = {'chunk_method': 'naive', 'chunk_token_num': 100, 'delimiter': '。'}
+        plain = chunk_markdown(text, {**base, 'overlap': 0})
+        overlapped = chunk_markdown(text, {**base, 'overlap': 20})
+        self.assertGreater(len(plain), 1)
+        self.assertGreater(len(overlapped), 1)
+        # 无重叠：相邻分段内容不重复；有重叠：后一分段以分段间重复的尾部句子开头
+        self.assertNotIn(plain[1]['content'][:8], plain[0]['content'])
+        self.assertIn(overlapped[1]['content'][:8], overlapped[0]['content'])
+        for piece in overlapped:  # 重叠不改变长度上限（单句不硬拆容忍度一致）
+            self.assertLessEqual(est_tokens(piece['content']), 100 + 10)
+
+    def test_overlap_clamped_to_limit(self):
+        """overlap 夹取到 limit-1：limit=1 时重叠为 0，退化为逐句成块且无重复。"""
+        text = '。'.join(f'句子{i}内容' for i in range(20)) + '。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 1, 'delimiter': '。'})
+        for piece in pieces:
+            self.assertLessEqual(est_tokens(piece['content']), 1 + 8)
+
     def test_data_uri_images_stripped(self):
         md = '# 标题\n\n![img](data:image/png;base64,AAAA)\n\n正文内容。'
         self.assertNotIn('data:image', clean_markdown(md))
         pieces = chunk_markdown(md, {'chunk_method': 'one'})
         self.assertIn('正文内容', pieces[0]['content'])
         self.assertNotIn('AAAA', pieces[0]['content'])
+
+    def test_image_refs_preserved_in_chunks(self):
+        # MinerU zip 产物的相对图片引用必须完整保留在分段中（渲染层改写为代理 URL）
+        md = '## 装配图\n\n零件关系如下图所示。\n\n![](images/page_0_image_body_3.jpg)\n\n按序号装配。'
+        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 512, 'delimiter': '\n。'})
+        joined = '\n'.join(p['content'] for p in pieces)
+        self.assertIn('![](images/page_0_image_body_3.jpg)', joined)
+
+    def test_extract_zip_bundle(self):
+        import io, zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('markdown.md', '# 手册\n\n![](images/a.jpg)\n\n说明。')
+            zf.writestr('images/a.jpg', b'\xff\xd8\xff')  # JPEG 头
+            zf.writestr('images/b.png', b'\x89PNG')
+            zf.writestr('model_output.json', '{}')  # 非图片/md，忽略
+        markdown, images = routes._extract_zip_bundle(buf.getvalue())
+        self.assertIn('![](images/a.jpg)', markdown)
+        self.assertEqual(set(images), {'a.jpg', 'b.png'})
+        self.assertEqual(images['a.jpg'], b'\xff\xd8\xff')
+
+    def test_image_name_validation(self):
+        # 图片代理的文件名白名单：拒绝路径遍历
+        for bad in ('../x.jpg', 'a/b.jpg', 'a\\b.jpg', ''):
+            self.assertIsNone(routes._IMAGE_NAME_RE.match(bad))
+        self.assertTrue(routes._IMAGE_NAME_RE.match('page_0_image_body_3.jpg'))
 
     def test_empty_markdown(self):
         self.assertEqual(chunk_markdown('   \n\n', {'chunk_method': 'naive'}), [])
@@ -195,11 +298,75 @@ class MinerULocalTests(unittest.TestCase):
         outro = ''.join(f'后续补充第{i}句。' for i in range(10))
         rows = '\n'.join(f'| 参数名称{i} | 详细说明文字{i} |' for i in range(6))
         md = f'## 参数表\n\n{intro}\n\n| 参数 | 说明 |\n| --- | --- |\n{rows}\n\n{outro}'
-        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 100, 'delimiter': '\n。'})
+        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 100, 'delimiter': '。'})
         self.assertGreater(len(pieces), 1)
         table_chunks = [p for p in pieces if '| 参数 | 说明 |' in p['content']]
         self.assertEqual(len(table_chunks), 1)
         self.assertIn('| 参数名称5 | 详细说明文字5 |', table_chunks[0]['content'])
+
+    def test_html_table_kept_atomic(self):
+        """MinerU HTML 表格是原子单元：绝不从中间切断（宁可整块超出）。"""
+        rows = ''.join(f'<tr><td>151381300{i}</td><td>左线钩Thread guide</td>'
+                       f'<td>螺钉SM11/64"×40 L=6</td></tr>' for i in range(30))
+        md = f'# 装配图\n\n<table><tbody>{rows}</tbody></table>\n\n按序号装配。'
+        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 64, 'delimiter': '。'})
+        joined = ''.join(p['content'] for p in pieces)
+        self.assertEqual(joined.count('<table>'), 1)
+        self.assertEqual(joined.count('</table>'), 1)
+        self.assertEqual(joined.count('<tr>'), 30)
+        self.assertNotIn('\x00tbl', joined)  # 占位符全部还原，无切断残留
+        containing = [p for p in pieces if '<table>' in p['content']]
+        self.assertEqual(len(containing), 1)  # 完整表格恰好落在同一个分段内
+        self.assertIn('</table>', containing[0]['content'])
+
+    def test_html_table_not_duplicated_in_overlap(self):
+        """表格占位不进重叠尾：相邻分段不重复整表。"""
+        md = '前文说明。' * 10 + '\n\n<table><tr><td>零件</td></tr></table>\n\n' + '后续补充。' * 10
+        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 40,
+                                     'delimiter': '。', 'overlap': 20})
+        self.assertEqual(sum('<table>' in p['content'] for p in pieces), 1)
+
+    def test_pipe_table_atomic_in_naive(self):
+        """naive 切句路径同样不切断管道表格（单元格内含句末标点）。"""
+        md = '前言说明。\n\n| 零件 | 说明 |\n| --- | --- |\n| 左线钩。单价 | 5 元 |\n\n结尾。'
+        pieces = chunk_markdown(md, {'chunk_method': 'naive', 'chunk_token_num': 8, 'delimiter': '。'})
+        joined = ''.join(p['content'] for p in pieces)
+        self.assertIn('| 左线钩。单价 | 5 元 |', joined)  # 表格行完整，未按句号切断
+        self.assertEqual(joined.count('| 零件 | 说明 |'), 1)
+
+    def test_table_forces_segment_break(self):
+        """表格结束后强制分段：表格分段不含后续正文，下一分段即使有 overlap 也不回带表格。"""
+        rows = '\n'.join(f'| 参数{i} | 说明{i} |' for i in range(6))
+        md = (f'前文说明第一句。前文说明第二句。\n\n| 参数 | 说明 |\n| --- | --- |\n{rows}\n\n'
+              f'后续正文第一句。后续正文第二句。')
+        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 200,
+                                     'delimiter': '。', 'overlap': 30})
+        containing = [p for p in pieces if '| 参数 | 说明 |' in p['content']]
+        self.assertEqual(len(containing), 1)
+        self.assertNotIn('后续正文第一句', containing[0]['content'])  # 表格分段到此为止
+        after = [p for p in pieces if '后续正文第一句' in p['content']]
+        self.assertTrue(after)
+        self.assertNotIn('| 参数', after[0]['content'])  # overlap 不回带表格内容
+
+    def test_table_note_attached_to_table_segment(self):
+        """表格下标（注：…）随表格同分段，且表格段（含下标）结束后才分段。"""
+        rows = '\n'.join(f'| 零件{i} | 数量{i} |' for i in range(5))
+        md = (f'| 零件 | 数量 |\n| --- | --- |\n{rows}\n\n注：以上数量为装配用量。\n\n'
+              f'后续正文内容。')
+        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 200, 'delimiter': '。'})
+        containing = [p for p in pieces if '| 零件 | 数量 |' in p['content']]
+        self.assertEqual(len(containing), 1)
+        self.assertIn('注：以上数量为装配用量。', containing[0]['content'])  # 下标属于表格分段
+        self.assertNotIn('后续正文内容', containing[0]['content'])          # 下标之后强制分段
+
+    def test_naive_table_forces_segment_break(self):
+        """naive 聚合路径：表格结束后同样强制分段（占位与邻文同句时先拆开再聚合）。"""
+        md = '前言说明。\n\n| a | b |\n| --- | --- |\n| 甲。乙 | 丙 |\n\n结尾说明。'
+        pieces = chunk_markdown(md, {'chunk_method': 'naive', 'chunk_token_num': 200, 'delimiter': '。'})
+        containing = [p for p in pieces if '| a | b |' in p['content']]
+        self.assertEqual(len(containing), 1)
+        self.assertNotIn('结尾说明', containing[0]['content'])
+        self.assertTrue(any('结尾说明' in p['content'] for p in pieces))
 
     def test_auto_texttile_fallback_structureless(self):
         topic_a = ''.join(f'数据库索引结构影响查询性能和事务吞吐{i}。' for i in range(24))
@@ -244,5 +411,102 @@ class MinerULocalTests(unittest.TestCase):
 
     def test_auto_empty_markdown(self):
         self.assertEqual(chunk_markdown('   \n\n', {'chunk_method': 'auto'}), [])
+
+    def test_auto_ignores_enable_children(self):
+        # 策略隔离：auto 分段不产生子块，即使配置中残留 enable_children
+        md = '# 第一章\n\n第一段。\n\n第二段。\n\n# 第二章\n\n第三段。'
+        pieces = chunk_markdown(md, {'chunk_method': 'auto', 'chunk_token_num': 512,
+                                     'enable_children': True, 'children_delimiter': '\n'})
+        self.assertGreater(len(pieces), 1)
+        for piece in pieces:
+            self.assertIsNone(piece['children'])
+
+    def test_non_naive_methods_ignore_enable_children(self):
+        # 策略隔离：book/paper 等自定义方式同样不产生子块
+        pieces = chunk_markdown('第一段。\n\n第二段。', {'chunk_method': 'book', 'chunk_token_num': 512,
+                                                    'delimiter': '。', 'enable_children': True})
+        self.assertEqual(len(pieces), 1)
+        self.assertIsNone(pieces[0]['children'])
+
+    def test_parsed_markdown_key_sibling_of_original(self):
+        doc = SimpleNamespace(storage_path='document-libraries/7/abc/doc.pdf')
+        self.assertEqual(routes._parsed_markdown_key(doc), 'document-libraries/7/abc/parsed.md')
+
+    def test_sniff_format(self):
+        # 合法 JSON 对象/数组 → json 视图；标量/非法 JSON/普通文本 → markdown 渲染
+        self.assertEqual(routes._sniff_format('{"a": 1}'), 'json')
+        self.assertEqual(routes._sniff_format('  \n[1, 2, 3]'), 'json')
+        self.assertEqual(routes._sniff_format('42'), 'markdown')
+        self.assertEqual(routes._sniff_format('{"a": '), 'markdown')
+        self.assertEqual(routes._sniff_format('# 标题\n\n正文'), 'markdown')
+
+
+class ParsedContentTests(unittest.IsolatedAsyncioTestCase):
+    """解析原文持久化（MinIO parsed.md）与读取端点；假模块注入避免依赖真实 MinIO。"""
+
+    def _fake_minio_module(self, get_object=None, upload_bytes=None):
+        import sys, types
+        fake = types.ModuleType('kb_common.clients.minio_client')
+        fake.RAW = 'raw-docs'
+        fake.upload_bytes = upload_bytes or Mock()
+        fake.minio = SimpleNamespace(get_object=get_object or Mock())
+        return fake
+
+    async def test_store_parsed_markdown_uploads_sibling_object(self):
+        import sys
+        doc = SimpleNamespace(storage_path='document-libraries/7/abc/doc.pdf')
+        fake = self._fake_minio_module()
+        with patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}):
+            await routes._store_parsed_markdown(doc, '# 手册')
+        fake.upload_bytes.assert_called_once_with('raw-docs', 'document-libraries/7/abc/parsed.md',
+                                                  '# 手册'.encode('utf-8'), 'text/markdown')
+
+    async def test_store_parsed_markdown_skips_empty(self):
+        import sys
+        fake = self._fake_minio_module()
+        with patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}):
+            await routes._store_parsed_markdown(SimpleNamespace(storage_path='a/b/c.md'), '')
+        fake.upload_bytes.assert_not_called()
+
+    async def test_parsed_content_endpoint_404_when_missing(self):
+        import sys, uuid as _uuid
+        doc = SimpleNamespace(storage_path='document-libraries/7/abc/doc.pdf')
+        fake = self._fake_minio_module(get_object=Mock(side_effect=RuntimeError('NoSuchKey')))
+        with patch.object(routes, 'bound_document', AsyncMock(return_value=(object(), doc))), \
+             patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}):
+            with self.assertRaises(HTTPException) as ctx:
+                await routes.parsed_content(7, _uuid.uuid4(), s=None)
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertIn('重新解析', str(ctx.exception.detail))
+
+
+class ProcessingMergeTests(unittest.TestCase):
+    """_processing_for 合并语义：文档级逐键覆盖库级（空字符串/None 不覆盖，False/0 覆盖）。"""
+
+    def merge(self, lib_cfg, doc_cfg):
+        lib = SimpleNamespace(engine_config={'processing': lib_cfg})
+        doc = SimpleNamespace(engine_config={'processing': doc_cfg} if doc_cfg is not None else None)
+        return routes._processing_for(lib, doc)
+
+    def test_doc_auto_overrides_lib_naive(self):
+        merged = self.merge({'chunk_method': 'naive', 'enable_children': True},
+                            {'chunk_method': 'auto', 'enable_children': False})
+        self.assertEqual(merged['chunk_method'], 'auto')
+        self.assertFalse(merged['enable_children'])  # False 必须覆盖，否则父子残留进 auto
+
+    def test_doc_without_config_uses_library(self):
+        merged = self.merge({'chunk_method': 'auto', 'chunk_token_num': 256}, None)
+        self.assertEqual(merged['chunk_method'], 'auto')
+        self.assertEqual(merged['chunk_token_num'], 256)
+
+    def test_empty_values_do_not_override(self):
+        merged = self.merge({'chunk_method': 'naive', 'delimiter': '。'},
+                            {'delimiter': '', 'embedding_model': None})
+        self.assertEqual(merged['delimiter'], '。')
+        self.assertIsNone(merged.get('embedding_model'))
+
+    def test_zero_overlap_overrides(self):
+        merged = self.merge({'overlap': 25}, {'overlap': 0})
+        self.assertEqual(merged['overlap'], 0)  # 0 是有效配置（不重叠），不能被过滤
 
 if __name__ == '__main__': unittest.main()

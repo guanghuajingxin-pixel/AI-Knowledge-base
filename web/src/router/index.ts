@@ -135,6 +135,13 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '检索测试', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
       },
       {
+        // 解析原文（文档级）：从分段页「新页面查看」进入，门户页签独立打开
+        path: 'apply/knowledge-libraries/:libId/documents/:docId/parsed-content',
+        name: 'DocumentParsedContent',
+        component: () => import('@/views/knowledge-libraries/ParsedContentPage.vue'),
+        meta: { title: '解析原文', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
+      },
+      {
         path: 'operate',
         name: 'Operate',
         component: () => import('@/views/governance/operate/index.vue'),

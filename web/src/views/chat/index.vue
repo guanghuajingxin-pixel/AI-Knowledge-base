@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { MagicStick, Search, User, ArrowUp, RefreshLeft, CopyDocument, EditPen, Delete, FullScreen, Operation } from '@element-plus/icons-vue'
+import { MagicStick, User, ArrowUp, RefreshLeft, CopyDocument, EditPen, Delete, FullScreen, Operation } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -103,17 +103,14 @@ function renderMd(md: string, citations?: SearchResult[], live = false): string 
 
 // 状态
 const query = ref('')
-// 可检索知识库 = 知识库抽象层（知识应用 → 知识库）里启用的镜像库（RAGFlow / DIFY）
+// 可检索知识库 = 知识库抽象层（知识应用 → 知识库）里启用的镜像库（RAGFlow / DIFY）；
+// 检索范围不再由问答页选择，固定取全部启用库，是否检索由智能体配置 retrieval_mode 决定
 const kbSources = ref<KnowledgeLibrary[]>([])
-const selectedLibraryIds = ref<number[]>([])
 const datasetsError = ref('')
 // 仅展示系统配置中「生效」的模型；is_default 为新会话默认模型
 const modelOptions = ref<Array<{ model: string; profile_id: string; profile_name: string; is_default: boolean }>>([])
 const selectedModel = ref('')
 const selectedProfileId = ref('')
-
-// 用户上次手动选择的模型（本地记忆，优先于默认模型）
-const MODEL_PREF_KEY = 'chat.selectedModel'
 
 // 智能体配置中已配置的模型（非空时问答页只能从中选择，不展示系统全部模型）
 const agentModels = ref<string[]>([])
@@ -122,59 +119,9 @@ function pickModel(modelName: string) {
   const opt = modelOptions.value.find((o) => o.model === modelName)
   selectedModel.value = opt?.model || modelName
   selectedProfileId.value = opt?.profile_id || ''
-  if (opt) localStorage.setItem(MODEL_PREF_KEY, modelName)
 }
-const kbSearch = ref(true)
-const dsPopoverVisible = ref(false)
 // 当前流式请求的中断句柄（streamChat 返回的 abort 函数）；运行中点停止按钮调用
 let abortCurrent: (() => void) | null = null
-
-// 按平台分组（DIFY / RagFlow）；空分组不展示
-const kbGroups = computed(() => {
-  return [
-    { engine: 'document', label: '文档库', items: kbSources.value.filter(s => s.library_type === 'document') },
-    { engine: 'dify', label: 'DIFY库', items: kbSources.value.filter(s => s.library_type !== 'document' && s.platform === 'dify') },
-    { engine: 'ragflow', label: 'RAGFLOW库', items: kbSources.value.filter(s => s.library_type !== 'document' && s.platform === 'ragflow') },
-  ].filter(g => g.items.length > 0)
-})
-
-// 全选 / 半选状态（跨全部已登记检索库）
-const isAllSelected = computed(
-  () => kbSources.value.length > 0 && selectedLibraryIds.value.length === kbSources.value.length,
-)
-const isIndeterminate = computed(
-  () =>
-    selectedLibraryIds.value.length > 0 &&
-    selectedLibraryIds.value.length < kbSources.value.length,
-)
-function toggleAllSources(val: any) {
-  selectedLibraryIds.value = val ? kbSources.value.map((s) => s.id) : []
-}
-// 单库勾选（不用 el-checkbox-group：多个分组共享同一 v-model 会互相覆盖选择）
-function toggleSource(id: number, val: any) {
-  if (val) {
-    if (!selectedLibraryIds.value.includes(id)) selectedLibraryIds.value = [...selectedLibraryIds.value, id]
-  } else {
-    selectedLibraryIds.value = selectedLibraryIds.value.filter((x) => x !== id)
-  }
-}
-// 组内全选/取消：切换该引擎分组下所有库
-function isGroupAllSelected(group: { items: KnowledgeLibrary[] }): boolean {
-  return group.items.length > 0 && group.items.every((s) => selectedLibraryIds.value.includes(s.id))
-}
-function isGroupIndeterminate(group: { items: KnowledgeLibrary[] }): boolean {
-  const n = group.items.filter((s) => selectedLibraryIds.value.includes(s.id)).length
-  return n > 0 && n < group.items.length
-}
-function toggleGroup(group: { items: KnowledgeLibrary[] }, val: any) {
-  const ids = group.items.map((s) => s.id)
-  const rest = selectedLibraryIds.value.filter((id) => !ids.includes(id))
-  selectedLibraryIds.value = val ? [...rest, ...ids] : rest
-}
-function closeKbSearch() {
-  kbSearch.value = false
-  dsPopoverVisible.value = false
-}
 
 // 对话
 interface ChatMsg {
@@ -481,9 +428,8 @@ async function loadGreeting() {
         const hit = sys.find((o) => o.model === name)
         return { model: name, profile_id: hit?.profile_id || '', profile_name: hit?.profile_name || '', is_default: !!hit?.is_default }
       })
-      const pref = localStorage.getItem(MODEL_PREF_KEY)
-      const target = (pref && g.models.includes(pref)) ? pref
-        : (g.default_model && g.models.includes(g.default_model)) ? g.default_model
+      // 模型由智能体配置决定：default_model → 系统默认 → 列表首个，不再提供手动选择
+      const target = (g.default_model && g.models.includes(g.default_model)) ? g.default_model
         : modelOptions.value.find((o) => o.is_default)?.model || g.models[0]
       pickModel(target)
     }
@@ -505,11 +451,8 @@ async function loadModels() {
         profile_name: m.profile_name,
         is_default: m.is_default,
       }))
-      // 选中优先级：本地记忆的上次选择 → 默认模型 → 第一个
-      const pref = localStorage.getItem(MODEL_PREF_KEY)
-      const target = opts.find((o) => o.model === pref)
-        || opts.find((o) => o.is_default)
-        || opts[0]
+      // 模型由配置决定：默认模型 → 第一个
+      const target = opts.find((o) => o.is_default) || opts[0]
       pickModel(target.model)
     } else {
       // 未配置生效模型时给占位，引导去系统配置
@@ -530,8 +473,6 @@ async function loadKbSources() {
     // 只取知识库抽象层里启用的库（RAGFlow / DIFY 镜像，登记于「知识应用 → 知识库」）
     const all = await listKnowledgeLibraries(true)
     kbSources.value = all
-    // 默认全选，用户可在弹窗中按组/按需取消
-    selectedLibraryIds.value = kbSources.value.map((s) => s.id)
   } catch (e: any) {
     datasetsError.value = e?.message || '加载失败'
     kbSources.value = []
@@ -563,10 +504,6 @@ function handleSendClick() {
 function handleAsk() {
   const q = query.value.trim()
   if (!q) return
-  if (kbSearch.value && selectedLibraryIds.value.length === 0 && kbSources.value.length) {
-    ElMessage.warning('请至少选择一个知识库')
-    return
-  }
   query.value = ''
   return askQuestion(q)
 }
@@ -639,10 +576,6 @@ interface AskTarget {
 }
 
 async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', target?: AskTarget) {
-  if (!action && kbSearch.value && selectedLibraryIds.value.length === 0 && kbSources.value.length) {
-    ElMessage.warning('请至少选择一个知识库')
-    return
-  }
   // 并发上限：最多 5 个会话同时问答（choice 等待确认不占后端并发）
   if (!action && activeRunCount.value >= MAX_CONCURRENT) {
     ElMessage.warning(`最多支持 ${MAX_CONCURRENT} 个会话并行问答，请等待部分会话完成后再发送`)
@@ -709,7 +642,8 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
     abortCurrent = streamChat(
       {
         query: q,
-        library_ids: kbSearch.value ? (selectedLibraryIds.value.length ? selectedLibraryIds.value : null) : [],
+        // 检索范围固定全部启用库（null=不限定）；是否检索由智能体配置 retrieval_mode 决定
+        library_ids: null,
         last_query: ctx.q,
         last_answer: ctx.a,
         history,
@@ -1364,79 +1298,8 @@ async function submitCorrection() {
         >{{ s }}</button>
       </div>
 
-      <!-- 输入区 -->
+      <!-- 输入区（模型与知识库检索范围由智能体配置决定，不在输入区展示） -->
       <div class="input-area">
-        <div class="input-tools">
-          <el-select
-            :model-value="selectedModel"
-            size="small"
-            style="width: 210px"
-            @update:model-value="pickModel"
-          >
-            <el-option
-              v-for="m in modelOptions"
-              :key="`${m.profile_id}-${m.model}`"
-              :label="m.model"
-              :value="m.model"
-            >
-              <span>{{ m.model }}</span>
-              <span v-if="m.is_default" style="float: right; color: #409eff; font-size: 12px">默认</span>
-            </el-option>
-          </el-select>
-          <el-popover
-            v-model:visible="dsPopoverVisible"
-            trigger="click"
-            placement="top-start"
-            :width="340"
-            :show-arrow="false"
-            popper-class="kb-ds-popover"
-            @show="kbSearch = true"
-          >
-            <template #reference>
-              <div class="tgl" :class="{ on: kbSearch }">
-                <el-icon><Search /></el-icon> 知识库检索
-                <span v-if="kbSearch" class="ds-badge">{{ selectedLibraryIds.length }}/{{ kbSources.length }}</span>
-              </div>
-            </template>
-            <div class="ds-pop">
-              <div class="ds-pop-bar">
-                <span>选择知识库</span>
-                <el-button link size="small" @click="closeKbSearch">关闭检索</el-button>
-              </div>
-              <el-divider style="margin: 6px 0" />
-              <div v-if="!kbSources.length" class="ds-pop-empty">
-                尚无可检索知识库，请到「知识应用 → 知识库」添加 DIFY / RagFlow 知识库。
-              </div>
-              <template v-else>
-                <el-checkbox
-                  :model-value="isAllSelected"
-                  :indeterminate="isIndeterminate"
-                  @change="toggleAllSources"
-                >全选</el-checkbox>
-                <div v-for="group in kbGroups" :key="group.engine" class="ds-group">
-                  <div class="ds-group-bar">
-                    <el-checkbox
-                      :model-value="isGroupAllSelected(group)"
-                      :indeterminate="isGroupIndeterminate(group)"
-                      @change="(v: any) => toggleGroup(group, v)"
-                    >{{ group.label }}</el-checkbox>
-                    <span class="ds-group-count">
-                      {{ group.items.filter((s) => selectedLibraryIds.includes(s.id)).length }}/{{ group.items.length }}
-                    </span>
-                  </div>
-                  <div class="ds-pop-list">
-                    <el-checkbox
-                      v-for="s in group.items"
-                      :key="s.id"
-                      :model-value="selectedLibraryIds.includes(s.id)"
-                      @change="(v: any) => toggleSource(s.id, v)"
-                    >{{ s.name }}</el-checkbox>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </el-popover>
-        </div>
         <div class="input-row">
           <textarea
             v-model="query"
@@ -1744,8 +1607,11 @@ button.mobile-only { display: none; }
 .warn-tip { margin: 12px auto 0; max-width: 560px; padding: 8px 12px; background: #fff7e6; border: 1px solid #ffd591; color: #ad6800; border-radius: 10px; font-size: 12.5px; line-height: 1.7; }
 
 /* ===== 消息列表 ===== */
-.chat-area { display: flex; flex-direction: column; gap: 18px; }
-.message { display: flex; gap: 10px; max-width: 92%; animation: fadeIn .3s ease; }
+.chat-area {
+  display: flex; flex-direction: column; gap: 18px;
+  width: 100%; max-width: 820px; margin: 0 auto; /* 居中内容列，问答不贴左右边缘 */
+}
+.message { display: flex; gap: 10px; max-width: 100%; animation: fadeIn .3s ease; }
 .message--user { align-self: flex-end; flex-direction: row-reverse; }
 .message--assistant { align-self: flex-start; }
 .message__avatar {
@@ -1775,6 +1641,7 @@ button.mobile-only { display: none; }
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  max-width: 630px; /* 问题气泡宽度上限 */
 }
 .bubble--user .bubble-text {
   display: inline-block;
@@ -1800,11 +1667,12 @@ button.mobile-only { display: none; }
 .msg-meta .msg-actions { opacity: 1; margin: 0; }
 .msg-time { font-size: 11px; color: var(--ink-3); }
 .bubble--ai {
-  background: color-mix(in srgb, var(--brand) 6%, #fff);
-  border: 1px solid color-mix(in srgb, var(--brand) 10%, transparent);
-  border-bottom-left-radius: 4px;
+  /* 答案无底色：正文直接铺在页面上，与参考设计一致 */
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
   color: var(--ink);
-  min-width: 200px;
 }
 .message__time { font-size: 11px; color: var(--ink-3); margin-top: 4px; padding: 0 4px; }
 
@@ -1965,7 +1833,9 @@ button.mobile-only { display: none; }
 /* ===== 输入区 ===== */
 .input-area {
   flex: 0 0 auto;
-  margin: 0 16px 16px;
+  width: calc(100% - 32px);
+  max-width: 820px; /* 与消息内容列同宽，上下对齐 */
+  margin: 0 auto 16px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--surface);
@@ -1973,7 +1843,6 @@ button.mobile-only { display: none; }
   transition: box-shadow .2s, border-color .2s;
 }
 .input-area:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent); }
-.input-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 4px 6px; }
 .input-row { display: flex; align-items: flex-end; gap: 10px; }
 .input-field {
   flex: 1 1 auto; min-width: 0; border: 0; outline: 0; resize: none;
@@ -1995,31 +1864,9 @@ button.mobile-only { display: none; }
 .send-btn.stopping:hover { background: #000; transform: scale(1.05); }
 .stop-square { width: 13px; height: 13px; border-radius: 3px; background: currentColor; display: block; }
 
-.tgl { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; cursor: pointer; user-select: none; background: var(--surface); }
-.tgl.on { color: var(--brand); border-color: color-mix(in srgb, var(--brand) 35%, #fff); background: color-mix(in srgb, var(--brand) 8%, #fff); }
-.ds-badge { font-size: 11px; color: var(--brand); margin-left: 2px; }
-
-.ds-pop { font-size: 13px; }
-.ds-pop-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
-.ds-pop-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-.ds-pop-list .el-checkbox { margin-right: 0; }
-.ds-pop-empty { padding: 12px 4px; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
-.ds-group { margin-top: 10px; }
-.ds-group-bar { display: flex; align-items: center; justify-content: space-between; padding-bottom: 4px; border-bottom: 1px solid var(--el-border-color-lighter); }
-.ds-group-bar .el-checkbox { font-weight: 600; }
-.ds-group-count { font-size: 11px; color: var(--el-text-color-secondary); }
-.ds-group .ds-pop-list { margin-top: 6px; padding-left: 8px; }
-
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
 /* ===== Element Plus 主色统一为品牌紫（限本页） ===== */
-.input-tools :deep(.el-select .el-input.is-focus .el-input__wrapper),
-.input-tools :deep(.el-select .el-input__wrapper.is-focus) { box-shadow: 0 0 0 1px var(--brand) inset; }
-/* 复选框：完全遵循 Element Plus 原生样式，仅通过主题变量 --el-color-primary 控制主色，
-   不覆盖 background/border/::after 等内部结构，避免破坏 hover/focus/过渡/indeterminate 横线等原生交互。
-   注意：.ds-pop 在 el-popover teleport 后脱离组件，--brand 未定义，故不在此设变量，
-   由全局 .kb-ds-popover 统一设置 Element Plus 主题变量 */
-.input-tools { --el-color-primary: var(--brand); }
 .bubble--ai :deep(.el-button--primary),
 .cfg-tip :deep(.el-button--primary) { background: var(--brand); border-color: var(--brand); }
 .bubble--ai :deep(.el-button--primary:hover),
@@ -2058,21 +1905,4 @@ button.mobile-only { display: none; }
 .evidence-status { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .evidence-warning { margin-bottom: 8px; }
 .evidence-excerpt { white-space: pre-wrap; max-height: 300px; overflow: auto; line-height: 1.7; overflow-wrap: anywhere; }
-</style>
-
-<!-- el-popover teleport 到 body，脱离组件 scoped 作用域；
-     仅设置 Element Plus 主题变量，让复选框原生样式（对勾/横线/hover/focus/过渡）完整生效 -->
-<style>
-.kb-ds-popover {
-  --el-color-primary: #6157ff;
-  --el-color-primary-light-3: #8a83ff;
-  --el-color-primary-light-5: #b3aeff;
-  --el-color-primary-light-7: #dcd9ff;
-  --el-color-primary-light-8: #eae8ff;
-  --el-color-primary-light-9: #f4f3ff;
-  --el-color-primary-dark-2: #4e46cc;
-  --el-checkbox-checked-bg-color: var(--el-color-primary);
-  --el-checkbox-checked-input-border-color: var(--el-color-primary);
-  --el-checkbox-input-border-color-hover: var(--el-color-primary);
-}
 </style>

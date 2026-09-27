@@ -5,10 +5,12 @@ job 完成时下载 markdown → 本地分段器按库分段规则切块 → Lib
 分段 CRUD / 导出 / 检索测试全部本地化，不再依赖 RAGFlow。
 """
 import asyncio
+import re
 import uuid
+import zipfile
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, func, delete, update
@@ -24,6 +26,9 @@ from kb_common.models import EmbeddingProfile, KnowledgeLibrary, LibraryChunk, L
 router = APIRouter(prefix="/api/v1/document-libraries", tags=["document-libraries"],
     dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 
+# 图片代理独立路由：不带 router 级 Bearer 依赖（<img> 请求无头），由端点内 ?token= 校验
+image_router = APIRouter(prefix="/api/v1/document-libraries", tags=["document-library-images"])
+
 
 class ProcessingConfig(BaseModel):
     chunk_method: Literal["auto", "naive", "book", "laws", "manual", "one", "paper", "presentation", "table"] = "naive"
@@ -31,6 +36,11 @@ class ProcessingConfig(BaseModel):
     chunk_token_num: int = Field(512, ge=1, le=2048)
     delimiter: str = Field("\n。！？；", min_length=1, max_length=100)
     embedding_model: str = Field("", max_length=200)
+    # 分段重叠度：滚动聚合时相邻分段重复携带的 Token 数（0 = 不重叠）
+    overlap: int = Field(25, ge=0, le=1024)
+    # 文本预处理规则（分段前执行，语义与 Dify pre_processing_rules 对齐）
+    replace_whitespace: bool = False
+    remove_urls_emails: bool = False
 
     enable_children: bool = False
     children_delimiter: str = Field("\n", min_length=1, max_length=100)
@@ -47,6 +57,10 @@ class ProcessingConfig(BaseModel):
 class LibraryIn(ProcessingConfig):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field("", max_length=2000)
+    # 索引设置策略视图（与文档级 DocumentConfigIn 对齐）：processing 为解析生效的最终分段参数
+    strategy: Literal["auto", "custom", "parent_child", "by_file_type"] = "auto"
+    enhancements: dict[str, bool] = Field(default_factory=dict)
+    type_rules: dict = Field(default_factory=dict)
 
     @field_validator("name")
     @classmethod
@@ -115,10 +129,28 @@ async def invoke(call):
         raise HTTPException(502, str(exc)) from exc
 
 
+def _library_engine_config(body: LibraryIn) -> dict:
+    """库级 engine_config：processing（解析生效参数）+ 策略视图（strategy/enhancements/type_rules）。"""
+    return {"processing": body.model_dump(exclude={"name", "description", "strategy", "enhancements", "type_rules"}),
+            "strategy": body.strategy, "enhancements": body.enhancements, "type_rules": body.type_rules}
+
+
+def _library_config(lib) -> dict:
+    """库级配置输出：与文档级 {processing, strategy, enhancements, type_rules} 结构对齐；
+    旧库未存 strategy 时按 processing 推导（父子 → parent_child，auto → auto，否则 custom）。"""
+    cfg = lib.engine_config or {}
+    processing = cfg.get("processing") or {}
+    strategy = cfg.get("strategy") or (
+        "parent_child" if processing.get("enable_children")
+        else "auto" if processing.get("chunk_method") == "auto" else "custom")
+    return {"processing": processing, "strategy": strategy,
+            "enhancements": cfg.get("enhancements") or {}, "type_rules": cfg.get("type_rules") or {}}
+
+
 def lib_out(lib, count=0):
     return {"id": lib.id, "name": lib.name, "description": lib.description,
             "enabled": lib.enabled, "document_count": count, "creator": lib.creator or "",
-            "config": lib.engine_config.get("processing", {}), "created_at": lib.created_at}
+            "config": _library_config(lib), "created_at": lib.created_at}
 
 
 def doc_out(doc):
@@ -150,7 +182,7 @@ async def list_libraries(s: AsyncSession = Depends(get_session)):
 async def create_library(body: LibraryIn, user: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     lib = KnowledgeLibrary(name=body.name, description=body.description, platform="mineru",
         dataset_id=uuid.uuid4().hex, library_type="document", enabled=True, creator=user.username,
-        engine_config={"processing": body.model_dump(exclude={"name", "description"})})
+        engine_config=_library_engine_config(body))
     s.add(lib)
     await s.commit()
     await s.refresh(lib)
@@ -178,7 +210,7 @@ async def embedding_models(s: AsyncSession = Depends(get_session)):
 async def configure_library(library_id: int, body: LibraryIn, s: AsyncSession = Depends(get_session)):
     lib = await library(s, library_id, lock=True)
     lib.name, lib.description = body.name, body.description
-    lib.engine_config = {**lib.engine_config, "processing": body.model_dump(exclude={"name", "description"})}
+    lib.engine_config = _library_engine_config(body)
     await s.commit()
     await s.refresh(lib)
     return lib_out(lib)
@@ -276,11 +308,90 @@ async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict, p
     doc.chunk_count = count
     from datetime import datetime as _dt
     doc.parsed_at = _dt.utcnow()
+    await _store_parsed_markdown(doc, markdown)
+
+
+def _parsed_markdown_key(doc) -> str:
+    """解析原文对象键：与原件同级的 parsed.md（txt/md/csv 原文即分段输入，同样落此键）。"""
+    return f"{doc.storage_path.rsplit('/', 1)[0]}/parsed.md"
+
+
+async def _store_parsed_markdown(doc, text: str):
+    """解析原文落 MinIO，供分段页「查看解析原文」读取（重解析同名覆盖）。"""
+    if not text:
+        return
+    from kb_common.clients import minio_client
+    await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW,
+                            _parsed_markdown_key(doc), text.encode("utf-8"), "text/markdown")
+
+
+def _sniff_format(text: str) -> Literal["json", "markdown"]:
+    """解析原文展示格式：合法 JSON 对象/数组按 JSON 视图，其余按 markdown 渲染。"""
+    import json
+    stripped = text.lstrip()
+    if stripped[:1] in ("{", "["):
+        try:
+            return "json" if isinstance(json.loads(stripped), (dict, list)) else "markdown"
+        except ValueError:
+            return "markdown"
+    return "markdown"
+
+
+_IMAGE_NAME_RE = re.compile(r"^[\w.-]+$")
+_IMAGE_MEDIA = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
+
+
+def _extract_zip_bundle(data: bytes) -> tuple[str, dict[str, bytes]]:
+    """解 MinerU zip 产物：markdown 正文 + images/ 图片字节。
+    markdown 中的图片保持 MinerU 原始相对引用（images/xxx.jpg），由渲染层改写为代理 URL。"""
+    import io
+    import zipfile
+    markdown = ""
+    images: dict[str, bytes] = {}
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for info in zf.infolist():
+            name = info.filename
+            base = name.rsplit("/", 1)[-1]
+            if not base or not _IMAGE_NAME_RE.match(base):
+                continue
+            if name.startswith("images/") and base.rsplit(".", 1)[-1].lower() in {
+                    e.lstrip(".") for e in _IMAGE_MEDIA}:
+                images[base] = zf.read(info)
+            elif not markdown and base.endswith(".md"):
+                markdown = zf.read(info).decode("utf-8", errors="replace")
+    return markdown, images
+
+
+def _images_prefix(doc) -> str:
+    """图片在 MinIO 的目录：与原件同级的 images/ 子目录。"""
+    return f"{doc.storage_path.rsplit('/', 1)[0]}/images"
+
+
+async def _store_images(doc, images: dict[str, bytes]):
+    """解析产物的图片落 MinIO，键：{原件目录}/images/{文件名}（重解析同名覆盖）。"""
+    if not images:
+        return
+    from kb_common.clients import minio_client
+
+    def upload_all():
+        for name, data in images.items():
+            ext = "." + name.rsplit(".", 1)[-1].lower()
+            minio_client.upload_bytes(minio_client.RAW, f"{_images_prefix(doc)}/{name}",
+                                      data, _IMAGE_MEDIA.get(ext, "application/octet-stream"))
+    await asyncio.to_thread(upload_all)
 
 
 async def _finalize_parse(adapter: MinerUEngine, s: AsyncSession, lib, doc, job: dict):
-    """job 完成后的落地动作：下载 markdown → 按文档生效规则分段。"""
-    markdown = await invoke(adapter.markdown(job))
+    """job 完成后的落地动作：下载产物（优先 zip，含图片）→ 图片落 MinIO → 按文档生效规则分段。"""
+    try:
+        markdown, images = _extract_zip_bundle(await invoke(adapter.zip_bundle(job)))
+    except (EngineError, ValueError, zipfile.BadZipFile):
+        markdown, images = "", {}
+    if not markdown:
+        # zip 不可用（旧引擎/产物缺失）时回退独立 markdown（base64 内联图会被清洗剔除）
+        markdown = await invoke(adapter.markdown(job))
+    await _store_images(doc, images)
     await _apply_chunks(s, doc, markdown, _processing_for(lib, doc),
                         partial=str(job.get("status", "")).lower() == "partial")
 
@@ -356,6 +467,48 @@ async def _do_parse(s: AsyncSession, library_id: int, doc_id: uuid.UUID):
     doc.engine_document_id, doc.engine_job_id = file_id, job_id
     doc.status, doc.progress, doc.message, doc.chunk_count = "PARSING", 0, "已提交解析", 0
     await s.commit()
+
+
+@image_router.get("/{library_id}/documents/{doc_id}/images/{image_name}")
+async def serve_image(library_id: int, doc_id: uuid.UUID, image_name: str,
+                      token: str = Query("", max_length=2000),
+                      s: AsyncSession = Depends(get_session)):
+    """分段内图片代理：<img> 无法携带 Authorization 头，JWT 改走 ?token= query。
+    角色要求与文档库主路由一致（super_admin/admin/editor），不能挂在主 router 上
+    （其 router 级 Bearer 依赖会拒绝无头请求）。"""
+    from kb_common.security import decode_jwt
+    try:
+        payload = decode_jwt(token)
+    except Exception:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "无效凭证")
+    from kb_common.database import short_session
+    async with short_session() as s_check:
+        user = await s_check.get(User, payload["sub"])
+    if not user or not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不可用")
+    if user.role not in ("super_admin", "admin", "editor"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "权限不足")
+
+    _, doc = await bound_document(s, library_id, doc_id)
+    if not _IMAGE_NAME_RE.match(image_name):
+        raise HTTPException(400, "非法文件名")
+    key = f"{_images_prefix(doc)}/{image_name}"
+    from kb_common.clients import minio_client
+
+    def read():
+        response = minio_client.minio.get_object(minio_client.RAW, key)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+    try:
+        data = await asyncio.to_thread(read)
+    except Exception:
+        raise HTTPException(404, "图片不存在")
+    ext = "." + image_name.rsplit(".", 1)[-1].lower()
+    return Response(data, media_type=_IMAGE_MEDIA.get(ext, "application/octet-stream"),
+                    headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.post("/{library_id}/documents/{doc_id}/parse")
@@ -479,6 +632,28 @@ async def preview_original(library_id: int, doc_id: uuid.UUID, s: AsyncSession =
     # fullfilename 拼在 kkFileView 这一层，不进 base64
     return {"preview_url": f"{kkfv_url}/onlinePreview?url={urllib.parse.quote(encoded)}&fullfilename={urllib.parse.quote(doc.name)}",
             "filename": doc.name}
+
+
+@router.get("/{library_id}/documents/{doc_id}/parsed-content")
+async def parsed_content(library_id: int, doc_id: uuid.UUID, s: AsyncSession = Depends(get_session)):
+    """解析原文（MinerU markdown / 纯文本直通）：JSON 内容标记 format=json 走 JSON 视图，
+    其余 format=markdown 由前端渲染；图片相对引用 images/ 与分段渲染共用代理改写。"""
+    _, doc = await bound_document(s, library_id, doc_id)
+    from kb_common.clients import minio_client
+
+    def read():
+        response = minio_client.minio.get_object(minio_client.RAW, _parsed_markdown_key(doc))
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+    try:
+        data = await asyncio.to_thread(read)
+    except Exception:
+        raise HTTPException(404, "暂无解析原文，请重新解析后生成")
+    text = data.decode("utf-8", errors="replace")
+    return {"content": text, "format": _sniff_format(text)}
 
 
 async def chunk_context(s, library_id, doc_id, writing=False):

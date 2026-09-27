@@ -93,7 +93,9 @@ class MinerUEngine:
             r = await c.post(f"{self.base_url}/v1/parse/jobs", json={
                 "files": [{"source": {"type": "file_id", "file_id": file_id}}],
                 "tier": "standard",
-                "output_formats": ["markdown"],
+                # markdown 独立产物的图片是 base64 内联（撑爆存储且会被清洗剔除）；
+                # zip 产物含 images/ 独立图片文件 + 相对引用 markdown，分段渲染图片依赖它
+                "output_formats": ["markdown", "zip"],
             })
             if r.status_code not in (200, 201, 202):
                 raise EngineError(f"MinerU 提交解析失败：HTTP {r.status_code} {r.text[:200]}")
@@ -126,6 +128,18 @@ class MinerUEngine:
                 return data if isinstance(data, str) else r.text
             except ValueError:
                 return r.text
+
+    async def zip_bundle(self, job: dict) -> bytes:
+        """下载 job 首个文件的 zip 产物（含 images/ 独立图片与相对引用 markdown）。"""
+        outputs = ((job.get("files") or [{}])[0].get("output_files") or {})
+        file_id = (outputs.get("zip") or {}).get("file_id")
+        if not file_id:
+            raise EngineError("解析完成但未返回 zip 产物")
+        async with self._client() as c:
+            r = await c.get(f"{self.base_url}/v1/files/{file_id}/content")
+            if r.status_code != 200:
+                raise EngineError(f"MinerU 下载 zip 产物失败：HTTP {r.status_code}")
+            return r.content
 
     async def cancel(self, job_id: str) -> None:
         """取消任务；任务已结束（404/409）不视为错误。"""

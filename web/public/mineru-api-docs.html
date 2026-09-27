@@ -17,15 +17,24 @@
     // 读取与「自定义解析」页签（ParserCustomTab）共享的 Base URL 配置，
     // 注入 Markdown 内的 {{MINERU_BASE}} / {{SWAGGER_URL}} 占位符。
     (function () {
-      var base = 'http://127.0.0.1:8010';
+      // 默认引擎 cloud：生产环境本地 mineru-kit 通常未部署，默认 127.0.0.1:8010
+      // 会让示例全部 502。若用户显式在 ParserCustomTab 里选过 local 并存了 baseUrl，
+      // 则尊重该配置。
+      var engine = 'cloud';
+      var localBase = 'http://127.0.0.1:8010';
       try {
         var raw = localStorage.getItem('kge:mineru_config_v1');
         if (raw) {
           var cfg = JSON.parse(raw);
-          if (cfg && cfg.baseUrl && String(cfg.baseUrl).trim()) base = String(cfg.baseUrl).trim();
+          if (cfg && cfg.engine === 'local') {
+            engine = 'local';
+            if (cfg.baseUrl && String(cfg.baseUrl).trim()) localBase = String(cfg.baseUrl).trim();
+          }
         }
       } catch (e) { /* 忽略损坏缓存 */ }
-      base = String(base).replace(/\/+$/, '');
+      var base = engine === 'cloud' ? 'cloud' : String(localBase).replace(/\/+$/, '');
+      // Swagger 链接仅本地引擎有意义；cloud 时指向 kb-api 自身 /docs（统一契约）
+      var swagger = engine === 'cloud' ? '/api/v1/mineru/../docs' : (base + '/docs');
 
       window.$docsify = {
         el: '#app',
@@ -48,7 +57,7 @@
             hook.beforeEach(function (content) {
               return content
                 .replace(/\{\{MINERU_BASE\}\}/g, base)
-                .replace(/\{\{SWAGGER_URL\}\}/g, base + '/docs');
+                .replace(/\{\{SWAGGER_URL\}\}/g, swagger);
             });
           },
         ],

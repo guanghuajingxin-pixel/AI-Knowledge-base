@@ -145,6 +145,7 @@ async def retrieve(
                 # Explicit test modes must never silently fall back to another mode.
                 attempts = [p for p in attempts if p.get('retrieval_model', {}).get('search_method') == search_method]
             data = None
+            last_err = ""
             for payload in attempts:
                 try:
                     resp = await client.post(url, json=payload, headers=_headers())
@@ -153,13 +154,16 @@ async def retrieve(
                     break
                 except httpx.HTTPStatusError as e:
                     body = (e.response.text or "")[:200]
+                    last_err = f"HTTP {e.response.status_code}"
                     logger.warning("Dify retrieve failed for dataset %s: HTTP %s %s",
                                    did, e.response.status_code, body)
                 except Exception as e:
+                    last_err = e.__class__.__name__
                     logger.warning("Dify retrieve failed for dataset %s: %s", did, e)
             if not data:
                 if search_method:
-                    raise RuntimeError("Dify 未能按指定检索模式返回结果")
+                    raise RuntimeError(
+                        f"Dify 服务调用失败，请检查网络或配置（{last_err or '详见服务日志'}）")
                 continue
             for record in data.get("records", []) or []:
                 seg = record.get("segment") or {}

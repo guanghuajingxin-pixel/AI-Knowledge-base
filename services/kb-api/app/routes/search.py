@@ -12,6 +12,7 @@ from sqlalchemy import select
 from kb_common.database import get_session, SessionLocal
 from kb_common.models import Document, UsageLog
 from kb_common.rag import searcher, tracer
+from kb_common.rag.embedder import EmbeddingError
 from app.deps import get_current_user, get_principal
 
 router = APIRouter(prefix="/api/v1/search", tags=["search"])
@@ -78,12 +79,18 @@ async def search_test(body: SearchIn, u=Depends(get_current_user), s: AsyncSessi
     rerank = body.rerank if body.rerank is not None else False
     # A selected profile is request-local; never mutate global model settings.
     candidate_body = body.model_copy(update={"top_k": 100}) if rerank else body
-    hits = await _dispatch(candidate_body, rerank=False)
+    try:
+        hits = await _dispatch(candidate_body, rerank=False)
+    except EmbeddingError as e:
+        raise HTTPException(502, str(e))
     if rerank and hits:
         from app.services.library_retrieval import rerank_hits
         for hit in hits:
             hit['matched_content'] = hit.get('text', '')
-        await rerank_hits(s, body.query, hits, str(body.rerank_model_id) if body.rerank_model_id else None)
+        try:
+            await rerank_hits(s, body.query, hits, str(body.rerank_model_id) if body.rerank_model_id else None)
+        except ValueError as e:
+            raise HTTPException(502, str(e))
         hits.sort(key=lambda h: h['score'], reverse=True)
     hits = [h for h in hits if h['score'] >= body.score_threshold][:body.top_k]
     results = [{"text": h.get("text"), "score": h.get("score"),

@@ -45,7 +45,13 @@ from app.routes.mineru_contract import (
 
 router = APIRouter(prefix="/api/v1/mineru", tags=["mineru"])
 
-DEFAULT_BASE = "http://127.0.0.1:8010"
+# 默认引擎：云端 SaaS。
+# 生产环境（10.10.166.2 等）本地 mineru-kit 通常未部署，若继续默认 127.0.0.1:8010
+# 会让所有未显式带 X-Mineru-Base 的请求 502。改为默认 cloud 后：
+#   - 未带头 → 走 SaaS
+#   - 显式带 base URL → 走本地 kit（保留开发/内网自建能力）
+#   - 显式带 "cloud" → 走 SaaS
+DEFAULT_BASE = "cloud"
 # 上传大文件 / 解析结果下载给足余量；建任务本身是异步的、秒级返回
 FORWARD_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 
@@ -54,9 +60,15 @@ HOP_HEADERS = {"host", "content-length", "connection", "authorization", "x-miner
 
 
 def _engine(request: Request) -> tuple[str, str]:
-    """('cloud', 'cloud') 或 ('local', base_url)。"""
-    base = (request.headers.get("x-mineru-base") or DEFAULT_BASE).strip().rstrip("/")
-    return ("cloud", "cloud") if base == "cloud" else ("local", base)
+    """('cloud', 'cloud') 或 ('local', base_url)。
+
+    - 头缺失 / 空串 / "cloud"（大小写不敏感）→ 云端 SaaS
+    - 其余 → 本地 kit（base_url 已 strip 尾斜杠）
+    """
+    raw = (request.headers.get("x-mineru-base") or "").strip()
+    if not raw or raw.lower() == "cloud":
+        return ("cloud", "cloud")
+    return ("local", raw.rstrip("/"))
 
 
 def _local_capabilities() -> dict:
@@ -249,6 +261,21 @@ async def file_content(request: Request, file_id: str,
 
 @router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
 async def proxy(path: str, request: Request, _u=Depends(require_role("super_admin", "admin"))) -> Response:
+    # 尾斜杠归一化：显式路由（如 POST /v1/uploads）注册时不带尾斜杠，
+    # 但 FastAPI 的 redirect_slashes 会被 path 转换器 catch-all 抢先匹配，
+    # 导致 /v1/uploads/ 落到这里返回 404「云端 SaaS 模式未实现该端点」。
+    # 这里手动 307 回无斜杠版本，让显式路由重新接管，避免调用方踩坑。
+    if path.endswith("/") and len(path) > 1:
+        stripped = path.rstrip("/")
+        target = f"{request.url.path.rstrip('/')}"
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+        return JSONResponse(
+            status_code=307,
+            content={"detail": f"路径尾斜杠已归一化，请重定向到 {stripped}"},
+            headers={"Location": target},
+        )
+
     engine, base = _engine(request)
     if engine == "cloud":
         raise HTTPException(404, f"云端 SaaS 模式未实现该端点：{request.method} /{path}")

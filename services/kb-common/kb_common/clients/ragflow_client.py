@@ -312,7 +312,10 @@ async def retrieve_with_report(dataset_ids: list[str], query: str, top_k: int | 
         if "rerank_id" in params:
             payload["rerank_id"] = params["rerank_id"]
         async with httpx.AsyncClient(timeout=60.0) as c:
-            resp = await c.post(f"{endpoint}/retrieval", json=payload, headers=headers)
+            try:
+                resp = await c.post(f"{endpoint}/retrieval", json=payload, headers=headers)
+            except httpx.HTTPError as e:
+                raise RagflowError(f"RAGFlow 服务连接失败，请检查网络或配置（{e.__class__.__name__}）") from e
             return _unwrap(resp, "RAGFlow 检索") or {}
 
     data: dict[str, Any] = {}

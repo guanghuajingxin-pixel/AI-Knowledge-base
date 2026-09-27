@@ -472,7 +472,7 @@ async def test_mineru_api(body: TestMinerUIn, u=Depends(require_role("super_admi
             r = await c.post(f"{base}/file-urls/batch",
                              headers={"Authorization": f"Bearer {api_key}"},
                              json={"enable_formula": False, "enable_table": False,
-                                   "language": "ch", "files": [{"name": "connectivity-test.txt"}]})
+                                   "language": "ch", "files": [{"name": "connectivity-test.pdf"}]})
     except Exception:
         return {"ok": False, "message": "无法连接到 MinerU 服务（网络不通/超时），请检查网络"}
     if r.status_code in (401, 403):

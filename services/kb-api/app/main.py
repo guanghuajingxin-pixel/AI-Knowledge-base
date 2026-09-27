@@ -119,7 +119,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="KB API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
+
+# CORS 白名单：默认覆盖 vite dev / 生产 nginx / 内网 IP，也可用 KGE_CORS_ORIGINS 逗号分隔覆盖。
+# 说明：nginx 同源部署（前端 8080 → /api/v1 → kb-api 8001）浏览器不发跨域预检，
+# 白名单主要给「本地起前端 + 远程 kb-api」「其它内网服务跨域调 API」用。
+import os as _os_cors
+_cors_env = _os_cors.environ.get("KGE_CORS_ORIGINS", "").strip()
+if _cors_env:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+else:
+    _cors_origins = [
+        "http://localhost:5173",   # vite dev
+        "http://localhost:8080",   # 本地生产端口
+        "http://localhost:3000",   # 常见前端调试端口
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8080",
+        "http://10.10.166.2:8080", # 内网 AI-KB 生产
+        "http://10.10.166.2",
+    ]
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
@@ -154,6 +172,7 @@ app.include_router(settings_route.router)
 app.include_router(knowledge_center.router)
 app.include_router(knowledge_library.router)
 app.include_router(managed_library.router)
+app.include_router(managed_library.image_router)
 app.include_router(sensitive.router)
 app.include_router(masking.router)
 app.include_router(dify_route.router)

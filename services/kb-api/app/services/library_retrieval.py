@@ -37,11 +37,16 @@ async def embeddings(texts, cfg):
     async with httpx.AsyncClient(timeout=120) as client:
         for offset in range(0, len(missing), 32):
             indices = missing[offset:offset + 32]
-            response = await client.post(cfg['base_url'].rstrip('/') + '/embeddings',
-                headers={'Authorization': f"Bearer {cfg['api_key']}"} if cfg['api_key'] else {},
-                json={'model': cfg['model'], 'input': [texts[i] for i in indices]})
-            response.raise_for_status()
-            data = response.json()['data']
+            try:
+                response = await client.post(cfg['base_url'].rstrip('/') + '/embeddings',
+                    headers={'Authorization': f"Bearer {cfg['api_key']}"} if cfg['api_key'] else {},
+                    json={'model': cfg['model'], 'input': [texts[i] for i in indices]})
+                response.raise_for_status()
+                data = response.json()['data']
+            except httpx.HTTPError as e:
+                raise ValueError('向量模型调用失败，请修改后重试') from e
+            except (KeyError, ValueError) as e:
+                raise ValueError('向量模型调用失败，请修改后重试') from e
             if len(data) != len(indices) or {d['index'] for d in data} != set(range(len(indices))):
                 raise ValueError('向量模型返回的索引或数量不正确')
             for item in data:
@@ -66,12 +71,17 @@ async def rerank_hits(session, query, hits, profile_id):
     if not cfg['api_url'] or not cfg['model']:
         raise ValueError('已开启 Rerank，请先选择或配置重排模型')
     async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(cfg['api_url'],
-            headers={'Authorization': f"Bearer {cfg['api_key']}"} if cfg['api_key'] else {},
-            json={'model': cfg['model'], 'query': query,
-                  'documents': [h['matched_content'] for h in hits], 'top_n': len(hits)})
-        response.raise_for_status()
-        rows = response.json()['results']
+        try:
+            response = await client.post(cfg['api_url'],
+                headers={'Authorization': f"Bearer {cfg['api_key']}"} if cfg['api_key'] else {},
+                json={'model': cfg['model'], 'query': query,
+                      'documents': [h['matched_content'] for h in hits], 'top_n': len(hits)})
+            response.raise_for_status()
+            rows = response.json()['results']
+        except httpx.HTTPError as e:
+            raise ValueError('重排模型调用失败，请修改后重试') from e
+        except (KeyError, ValueError) as e:
+            raise ValueError('重排模型调用失败，请修改后重试') from e
     lexical = await asyncio.to_thread(rerank_term_scores, query, hits)
     for hit, score in zip(hits, lexical):
         hit['retrieval_token_similarity'] = hit.get('token_similarity')
