@@ -8,7 +8,22 @@ export interface StepItem {
   done: boolean
   status?: StepStatus
 }
+/** 「读取文档正文」失败（工具报错/处理失败）：用户端直接忽略，不在会话中显示 */
+export function isFailedReadStep(title: string | undefined, status?: string, detail?: string): boolean {
+  return !!title && title.includes('读取文档正文')
+    && (status === 'failed' || detail === '处理失败')
+}
+/** 过滤警告中「读取文档正文失败」类条目（用户端忽略，不上屏） */
+export function filterReadFailWarnings(warnings: string[] | undefined): string[] {
+  return (warnings || []).filter((w) => !w.includes('读取文档正文失败'))
+}
 export function updateStep(steps: StepItem[], event: StreamEvent) {
+  // 读取文档正文失败：忽略该事件，并移除先前的 running 占位，避免残留
+  if (isFailedReadStep(event.title, event.status, event.detail)) {
+    const idx = steps.findIndex((step) => step.id && step.id === event.step_id)
+    if (idx >= 0) steps.splice(idx, 1)
+    return
+  }
   const id = event.step_id
   const existing = id ? steps.find((step) => step.id === id) : undefined
   const status = event.status || 'running'

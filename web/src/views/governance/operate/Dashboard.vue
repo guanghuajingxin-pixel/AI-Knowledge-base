@@ -164,12 +164,14 @@ const ownerStats = [
 </script>
 
 <template>
-  <div class="page">
+  <div class="kge-page dash-page">
     <div class="page-head">
       <h2 class="pg-title">运营看板</h2>
       <el-button size="small" :loading="loading" @click="loadAll">🔄 刷新</el-button>
     </div>
 
+    <!-- 内容区：标题固定，其余内部滚动（kge-fill 约定） -->
+    <div class="dash-body">
     <!-- 钉钉未配置 -->
     <div v-if="notConfigured" class="warn-bar">
       <el-icon><WarningFilled /></el-icon>
@@ -377,11 +379,14 @@ const ownerStats = [
         </el-card>
       </el-col>
     </el-row>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.page { padding: 4px 0 24px; }
+/* kge-page 为 flex 纵向容器：标题行固定，内容区撑满剩余高度并内部滚动 */
+.dash-page .page-head { flex-shrink: 0; }
+.dash-body { flex: 1; min-height: 0; overflow-y: auto; }
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
 .pg-title { font-size: 19px; margin: 0; }
 .warn-bar { display: flex; align-items: center; gap: 8px; background: #FFFBEB; border: 1px solid #FDE68A; color: #92400E; padding: 8px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; }

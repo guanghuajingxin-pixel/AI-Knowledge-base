@@ -52,7 +52,7 @@ it('先显示摘要和置信度，等待超过旧倒计时仍不擅自探索钉�
   expect(saved.detail?.choice).toMatchObject({ answered: false })
 })
 
-it.each([['继续从钉钉知识库探索', 'continue'], ['基于知识库内容回答', 'stop']])('点击%s才以正确动作续跑同一会话', async (label, action) => {
+it.each([['继续从钉钉知识库探索', '继续探索', 'continue'], ['基于知识库内容回答', '先回答', 'stop']])('点击「%s」按钮（显示为「%s」）才以正确动作续跑同一会话', async (_opt, label, action) => {
   const view = await pause()
   vi.mocked(streamChat).mockImplementation(() => vi.fn())
   const button = view.findAll('.choice-btn').find(b => b.text() === label)!

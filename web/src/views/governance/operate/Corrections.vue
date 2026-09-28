@@ -1,5 +1,5 @@
 <template>
-  <div class="page corr-page">
+  <div class="kge-page corr-page">
     <!-- 过滤栏 -->
     <div class="filter-bar">
       <el-input
@@ -23,8 +23,9 @@
       <el-button @click="onReset">重置</el-button>
     </div>
 
-    <!-- 工单表格 -->
-    <el-table v-loading="loading" :data="items" class="corr-table" empty-text="暂无数据">
+    <!-- 工单表格：撑满剩余高度，表体内部滚动（kge-fill 约定） -->
+    <div class="table-fill">
+      <el-table v-loading="loading" :data="items" class="corr-table" height="100%" empty-text="暂无数据">
       <el-table-column label="知识标题" min-width="240" show-overflow-tooltip>
         <template #default="{ row }">
           <a v-if="(row as CorrectionItem).knowledge_url"
@@ -56,7 +57,8 @@
           >处理</el-button>
         </template>
       </el-table-column>
-    </el-table>
+      </el-table>
+    </div>
 
     <!-- 分页 -->
     <div v-if="total > 0" class="pager">
@@ -210,12 +212,14 @@ onMounted(load)
 </script>
 
 <style scoped>
-.corr-page { padding: 4px 0 24px; }
+/* kge-page 为 flex 纵向容器：过滤栏/分页固定，表格撑满剩余高度（kge-fill 约定） */
 .filter-bar {
   display: flex; align-items: center; gap: 12px;
   background: #fff; border: 1px solid var(--line, #E5E7EB); border-radius: 10px;
   padding: 14px 16px; margin-bottom: 14px;
+  flex-shrink: 0;
 }
+.table-fill { flex: 1; min-height: 0; }
 .corr-table {
   background: #fff; border-radius: 10px; border: 1px solid var(--line, #E5E7EB);
 }
@@ -228,7 +232,8 @@ a.kb-link:hover { color: #2563EB; text-decoration: underline; }
 .handle-title { font-weight: 600; color: #374151; }
 .pager {
   display: flex; align-items: center; justify-content: flex-end; gap: 14px;
-  margin-top: 18px;
+  margin-top: 14px;
+  flex-shrink: 0;
 }
 .pager-total { font-size: 13.5px; color: #6B7280; }
 </style>

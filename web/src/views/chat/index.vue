@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { MagicStick, User, ArrowUp, RefreshLeft, CopyDocument, EditPen, Delete, FullScreen, Operation } from '@element-plus/icons-vue'
+import { ArrowUp, Plus, CopyDocument, EditPen, Delete, FullScreen, Operation, ChatDotRound, MagicStick } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -13,7 +13,7 @@ import { getDingtalkConfig, dingtalkLogin } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
 import type { SearchResult } from '@/types/search'
 import { citationUrl, linkEvidence } from '@/utils/chat-evidence'
-import { updateStep, settleSteps, evidenceLabel, type StepItem } from '@/utils/chat-progress'
+import { updateStep, settleSteps, evidenceLabel, isFailedReadStep, filterReadFailWarnings, type StepItem } from '@/utils/chat-progress'
 
 /** 引用来源标签：如实显示知识来源平台（与后端 citations.source 取值对应） */
 const SOURCE_LABELS: Record<string, string> = {
@@ -203,7 +203,8 @@ const loading = computed(() => !!currentSession.value && runs.get(currentSession
 
 // 智能体配置（开场白/建议词/开关，来自 /agent/greeting）
 const greetingText = ref('你好！我是杰克百晓生，公司知识问答助手。')
-const botAvatar = ref('')  // 机器人头像（智能体配置；空=默认图标）
+// 机器人头像：智能体配置中上传的图片（data: 或 http 链接），空=默认图标
+const botAvatarUrl = ref('')
 const suggestions = ref<string[]>([])
 const followUpEnabled = ref(true)
 const longMemoryEnabled = ref(true)
@@ -351,8 +352,9 @@ async function selectSession(id: string, needCheck = true) {
         time: m.created_at ? m.created_at.slice(11, 16) : '',
         meta: m.meta || undefined,
         dbId: m.role === 'assistant' ? m.id : undefined,
-        steps: m.detail?.steps as any,
-        quality: m.detail?.quality,
+        // 「读取文档正文」失败步骤不上屏：历史重载同样忽略
+        steps: (m.detail?.steps as any)?.filter?.((s: StepItem) => !isFailedReadStep(s.title, s.status, s.detail)),
+        quality: m.detail?.quality ? { ...m.detail.quality, warnings: filterReadFailWarnings(m.detail.quality.warnings) } : undefined,
         answerStatus: m.detail?.answer_status,
         assessment: m.detail?.assessment,
         choice: m.detail?.choice ? { ...m.detail.choice, answered: m.detail.choice.answered || m.id !== res.messages[res.messages.length - 1]?.id } : undefined,
@@ -409,8 +411,8 @@ async function renameSession(s: ChatSession) {
 async function loadGreeting() {
   try {
     const g = await getGreeting()
-    botAvatar.value = g.bot_avatar || ''
     greetingText.value = g.greeting_enabled ? (g.greeting || '你好！我是企业知识问答助手。') : ''
+    botAvatarUrl.value = g.bot_avatar || ''
     suggestions.value = g.suggested_questions || []
     followUpEnabled.value = g.follow_up_enabled
     longMemoryEnabled.value = g.long_memory_enabled
@@ -534,10 +536,10 @@ function chooseOption(msgIdx: number, opt: string) {
   askQuestion(opt, action)
 }
 
-/** 确认按钮展示文案：去掉选项中的括号补充说明（如「继续探索（再给我一些时间）」→「继续探索」），
- * 按钮保持简洁、不叠加倒计时；实际续跑仍提交原始选项文字，倒计时仅在卡片提示行展示。 */
+/** 确认按钮展示文案：选项统一映射为简短文案（「继续探索」/「先回答」），
+ * 实际续跑仍提交原始选项文字与 action，后端行为不受影响。 */
 function choiceLabel(opt: string): string {
-  return opt.replace(/（[^）]*）/g, '').trim() || opt
+  return opt.includes('继续') ? '继续探索' : '先回答'
 }
 
 /** 确认超时自动续跑：等效用户点「继续探索」。
@@ -697,7 +699,7 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
             if (assessment.citations) msg.citations = assessment.citations
           }
           if (usage && usage.total_tokens > 0) msg.usage = usage
-          msg.meta = `🦌 DeerFlow · 等待确认 · ${run.model}`
+          msg.meta = `等待确认 · ${run.model}`
           // 流已结束：转为「等待确认」态（不占后端并发），用户点选后发起新请求续跑
           // 注意 runs 为 reactive Map，get 返回代理，须用 isRun（toRaw 归一）判断身份
           if (isRun(sid, run)) runs.get(sid)!.status = 'choice'
@@ -727,7 +729,8 @@ async function askQuestion(q: string, action: '' | 'continue' | 'stop' = '', tar
             else msg.content = res.answer
           }
           else if (!msg.content) msg.content = '（未生成回答）'
-          msg.quality = res.quality
+          // 「读取文档正文失败」类警告用户端直接忽略，不上屏
+          msg.quality = res.quality ? { ...res.quality, warnings: filterReadFailWarnings(res.quality.warnings) } : undefined
           msg.answerStatus = res.answer_status
           msg.citations = citations
           msg.noResult = noResult
@@ -910,10 +913,7 @@ function nowTime() {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-// 重新对话：清空消息回到欢迎态（下一首问时创建新会话与新 DeerFlow thread）
-function restart() {
-  resetToWelcome()
-}
+// 重新对话功能已从头部移除，resetToWelcome 仍被发送/错误流程使用
 
 function goToConfig() {
   router.push('/model')
@@ -1014,7 +1014,7 @@ async function submitCorrection() {
     <!-- 会话历史侧边栏 -->
     <aside class="history-panel">
       <button type="button" class="new-chat-btn" @click="newSession">
-        <el-icon><RefreshLeft /></el-icon> 新建会话
+        <el-icon><Plus /></el-icon> 新建会话
       </button>
       <div class="history-title">会话历史</div>
       <div v-loading="historyLoading" class="history-list">
@@ -1047,20 +1047,12 @@ async function submitCorrection() {
     </aside>
 
     <div class="chat-card">
-      <!-- 聊天头部：助手身份卡 -->
+      <!-- 聊天头部：居中显示机器人头像 + 会话标题 -->
       <header class="chat-header">
-        <div class="assistant-identity">
-          <div class="assistant-avatar">
-            <img v-if="botAvatar" :src="botAvatar" alt="机器人头像" />
-            <el-icon v-else><MagicStick /></el-icon>
-          </div>
-          <div class="assistant-meta">
-            <span class="assistant-name">杰克百晓生</span>
-            <span class="assistant-status">
-              <span class="status-dot" :class="{ busy: loading }"></span>
-              {{ loading ? '正在思考…' : '在线 · 随时解答' }}
-            </span>
-          </div>
+        <div class="chat-title-group">
+          <img v-if="botAvatarUrl" class="bot-avatar bot-avatar--img" :src="botAvatarUrl" alt="机器人头像" />
+          <span v-else class="bot-avatar"><el-icon><MagicStick /></el-icon></span>
+          <div class="chat-title" :title="currentSession?.title || '智能问答'">{{ currentSession?.title || '智能问答' }}</div>
         </div>
         <div class="header-actions">
           <button v-if="!standalone" type="button" class="icon-btn mobile-only" title="会话历史" @click="mobileSessionOpen = !mobileSessionOpen">
@@ -1068,9 +1060,6 @@ async function submitCorrection() {
           </button>
           <button v-if="!standalone" type="button" class="icon-btn" title="新窗口打开" @click="openStandalone">
             <el-icon><FullScreen /></el-icon>
-          </button>
-          <button type="button" class="icon-btn" title="重新对话" @click="restart">
-            <el-icon><RefreshLeft /></el-icon>
           </button>
         </div>
       </header>
@@ -1092,11 +1081,6 @@ async function submitCorrection() {
         <!-- 消息列表 -->
         <div v-else class="chat-area">
           <div v-for="(m, i) in messages" :key="i" class="message" :class="m.role === 'user' ? 'message--user' : 'message--assistant'">
-            <!-- 头像 -->
-            <div class="message__avatar" :class="m.role === 'user' ? 'avatar--user' : 'avatar--ai'">
-              <img v-if="m.role !== 'user' && botAvatar" :src="botAvatar" alt="机器人头像" />
-              <el-icon v-else><User v-if="m.role === 'user'" /><MagicStick v-else /></el-icon>
-            </div>
             <div class="message__col">
               <!-- 用户消息 -->
               <template v-if="m.role === 'user'">
@@ -1130,7 +1114,6 @@ async function submitCorrection() {
                 <div
                   v-if="m.steps && m.steps.length"
                   class="steps-bar"
-                  :class="{ 'steps-bar--live': !m.done }"
                 >
                   <div class="steps-bar__header" @click="toggleSteps(i)">
                     <template v-if="!m.done && !m.stepsExpanded">
@@ -1150,7 +1133,6 @@ async function submitCorrection() {
                           <span class="step-live-detail">{{ st.detail }}</span>
                         </div>
                       </div>
-                      <span class="steps-expand-hint">▸ 展开过程</span>
                     </template>
                     <template v-else>
                       <span class="steps-bar__label">
@@ -1179,7 +1161,7 @@ async function submitCorrection() {
                 </div>
 
                 <!-- 限时探索确认卡片：智能体暂停等待用户选择是否继续 -->
-                <div v-if="m.assessment" class="choice-card">
+                <div v-if="m.assessment" class="assess-card">
                   <strong>当前知识库内容总结</strong>
                   <div class="ans-text md-body" v-html="renderMd(m.content, m.citations)" />
                   <strong>置信度（证据支持程度）：{{ m.assessment.confidence }}/100</strong>
@@ -1194,7 +1176,6 @@ async function submitCorrection() {
                       :key="oi"
                       type="button"
                       class="choice-btn"
-                      :class="{ 'choice-btn--primary': opt.includes('继续') }"
                       :disabled="m.choice.answered || loading"
                       @click="chooseOption(i, opt)"
                     >{{ choiceLabel(opt) }}</button>
@@ -1244,26 +1225,34 @@ async function submitCorrection() {
                         <span class="cite">[{{ c.citation_id || ci + 1 }}]</span>
                         <a v-if="citationUrl(c)" class="ref-title ref-link" :href="citationUrl(c)" :title="c.document_title" target="_blank" rel="noopener">{{ c.document_title || '未知文档' }}</a>
                         <span v-else class="ref-title" :title="c.document_title">{{ c.document_title || '未知文档' }}</span>
-                        <el-popover v-if="c.quote || c.text" trigger="click" :width="420" placement="top">
-                          <template #reference><el-button link type="primary" size="small">查看依据</el-button></template>
-                          <div class="evidence-excerpt">{{ c.quote || c.text }}</div>
-                          <small v-if="c.partial">此处为原文片段，请结合源文档核对适用范围。</small>
-                        </el-popover>
                         <span v-if="c.page_number" class="ref-page">第 {{ c.page_number }} 页</span>
                         <span class="doc-tag">{{ sourceLabel(c.source) }}</span>
                         <el-tooltip content="对这条知识纠错" placement="top">
-                          <span class="ref-correct" @click="feedback('correct', m, c)">👎 纠错</span>
+                          <el-icon class="ref-correct" @click="feedback('correct', m, c)"><ChatDotRound /></el-icon>
                         </el-tooltip>
                       </div>
                     </div>
                     <div class="feedbackbar">
                       <span class="fb-label">有帮助吗？</span>
-                      <el-button size="small" :type="m.feedback === 'helpful' ? 'success' : ''"
-                                 :disabled="!!m.feedback" @click="feedback('helpful', m)">👍 有帮助</el-button>
-                      <el-button size="small" :type="m.feedback === 'correct' ? 'danger' : ''"
-                                 :disabled="!!m.feedback" @click="feedback('correct', m)">👎 纠错</el-button>
-                      <el-button size="small" :type="m.feedback === 'notfound' ? 'warning' : ''"
-                                 :disabled="!!m.feedback" @click="feedback('notfound', m)">❓ 没找到想要的</el-button>
+                      <!-- 反馈按钮：仅图标，顺序=有帮助 → 没帮助 → 纠错；类型沿用 helpful/notfound/correct -->
+                      <el-tooltip content="有帮助" placement="top">
+                        <button type="button" class="fb-icon" :class="{ active: m.feedback === 'helpful' }"
+                                :disabled="!!m.feedback" aria-label="有帮助" @click="feedback('helpful', m)">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6.633 10.25c.806 0 1.533-.446 2.031-1.08a9.041 9.041 0 0 1 2.861-2.4c.723-.384 1.35-.956 1.653-1.715a4.498 4.498 0 0 0 .322-1.672V3a.75.75 0 0 1 .75-.75 2.25 2.25 0 0 1 2.25 2.25c0 1.152-.26 2.243-.723 3.218-.266.558.107 1.282.725 1.282h3.126c1.026 0 1.945.694 2.054 1.715.045.422.068.85.068 1.285a11.95 11.95 0 0 1-2.649 7.521c-.388.482-.987.729-1.605.729H13.48c-.483 0-.964-.078-1.423-.23l-3.114-1.04a4.501 4.501 0 0 0-1.423-.23H5.904m10.598-9.75H14.25M5.904 18.5c.083.205.173.405.27.602.197.4-.078.898-.523.898h-.908c-.889 0-1.713-.518-1.972-1.368a12 12 0 0 1-.521-3.507c0-1.553.295-3.036.831-4.398C3.387 9.953 4.167 9.5 5 9.5h1.053c.472 0 .745.556.5.96a8.958 8.958 0 0 0-1.302 4.665c0 1.194.232 2.333.654 3.375Z" /></svg>
+                        </button>
+                      </el-tooltip>
+                      <el-tooltip content="没帮助" placement="top">
+                        <button type="button" class="fb-icon" :class="{ active: m.feedback === 'notfound' }"
+                                :disabled="!!m.feedback" aria-label="没帮助" @click="feedback('notfound', m)">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7.498 15.25H4.372c-1.026 0-1.945-.694-2.054-1.715a12.137 12.137 0 0 1-.068-1.285c0-2.848.992-5.464 2.649-7.521C5.287 4.247 5.886 4 6.504 4h4.016a4.5 4.5 0 0 1 1.423.23l3.114 1.04a4.5 4.5 0 0 0 1.423.23h1.294M7.498 15.25c.618 0 .991.724.725 1.282A7.471 7.471 0 0 0 7.5 19.75 2.25 2.25 0 0 0 9.75 22a.75.75 0 0 0 .75-.75v-.633c0-.573.11-1.14.322-1.672.304-.76.93-1.33 1.653-1.715a9.04 9.04 0 0 0 2.86-2.4c.498-.634 1.226-1.08 2.032-1.08h.384m-10.253 1.5H9.7m8.075-9.75c.01.05.027.1.05.148.593 1.2.925 2.55.925 3.977 0 1.487-.36 2.89-.999 4.125m.023-8.25c-.076-.365.183-.75.575-.75h.908c.889 0 1.713.518 1.972 1.368.339 1.11.521 2.287.521 3.507 0 1.553-.295 3.036-.831 4.398-.306.774-1.086 1.227-1.918 1.227h-1.053c-.472 0-.745-.556-.5-.96a8.95 8.95 0 0 0 .303-.54" /></svg>
+                        </button>
+                      </el-tooltip>
+                      <el-tooltip content="纠错" placement="top">
+                        <button type="button" class="fb-icon" :class="{ active: m.feedback === 'correct' }"
+                                :disabled="!!m.feedback" aria-label="纠错" @click="feedback('correct', m)">
+                          <el-icon><ChatDotRound /></el-icon>
+                        </button>
+                      </el-tooltip>
                     </div>
                     <!-- 下一步问题建议 -->
                     <div v-if="m.followUps && m.followUps.length" class="followups">
@@ -1454,14 +1443,14 @@ button.mobile-only { display: none; }
   padding: 9px 0;
   border: none;
   border-radius: var(--radius-md);
-  background: var(--brand);
-  color: var(--brand-ink);
+  background: var(--surface-2);
+  color: var(--ink);
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity .15s;
+  transition: background .15s;
 }
-.new-chat-btn:hover { opacity: .9; }
+.new-chat-btn:hover { background: #E2E8F0; }
 .history-title {
   font-size: 12px;
   color: var(--ink-3);
@@ -1488,7 +1477,7 @@ button.mobile-only { display: none; }
   transition: background .15s;
 }
 .history-item:hover { background: var(--surface-2); }
-.history-item.active { background: color-mix(in srgb, var(--brand) 10%, transparent); color: var(--brand); font-weight: 600; }
+.history-item.active { background: color-mix(in srgb, #409EFF 12%, transparent); color: #409EFF; font-weight: 600; }
 .history-name {
   flex: 1 1 auto;
   overflow: hidden;
@@ -1550,34 +1539,43 @@ button.mobile-only { display: none; }
   overflow: hidden;
 }
 
-/* ===== 头部助手身份卡 ===== */
+/* ===== 聊天头部 ===== */
 .chat-header {
   flex: 0 0 auto;
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--line);
 }
-.assistant-identity { display: flex; align-items: center; gap: 12px; }
-.assistant-avatar {
-  width: 42px; height: 42px; border-radius: 50%;
-  display: grid; place-items: center;
-  background: linear-gradient(135deg, var(--brand) 0%, color-mix(in srgb, var(--brand) 70%, #fff) 100%);
-  color: var(--brand-ink);
-  font-size: 20px;
-  border: 2px solid var(--surface);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 20%, transparent);
-  overflow: hidden;
+/* 会话标题：机器人头像 + 标题组合在头部水平居中，过长省略 */
+.chat-title-group {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 60%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
-.assistant-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.assistant-meta { display: flex; flex-direction: column; gap: 2px; }
-.assistant-name { font-weight: 600; font-size: 15px; color: var(--ink); }
-.assistant-status { font-size: 12.5px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
-.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
-.status-dot.busy { background: #F59E0B; animation: pulse 1.2s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.bot-avatar {
+  width: 24px; height: 24px; border-radius: 50%;
+  background: var(--brand); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; flex-shrink: 0;
+}
+.bot-avatar--img { object-fit: cover; background: var(--surface-2); }
+.chat-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--ink);
+}
 .header-actions { display: flex; gap: 8px; }
 .icon-btn {
   width: 36px; height: 36px; border-radius: var(--radius-md);
@@ -1614,16 +1612,6 @@ button.mobile-only { display: none; }
 .message { display: flex; gap: 10px; max-width: 100%; animation: fadeIn .3s ease; }
 .message--user { align-self: flex-end; flex-direction: row-reverse; }
 .message--assistant { align-self: flex-start; }
-.message__avatar {
-  width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
-  display: grid; place-items: center; margin-top: 2px; font-size: 15px;
-}
-.avatar--ai {
-  background: linear-gradient(135deg, var(--brand) 0%, color-mix(in srgb, var(--brand) 70%, #fff) 100%);
-  color: var(--brand-ink);
-}
-.avatar--user { background: var(--surface-2); color: var(--ink-2); }
-.avatar--ai img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
 .message__col { min-width: 0; display: flex; flex-direction: column; }
 .message--user .message__col { align-items: flex-end; }
 
@@ -1696,12 +1684,12 @@ button.mobile-only { display: none; }
 .typing-dot:nth-child(2) { animation-delay: -.16s; }
 @keyframes bounce { 0%,80%,100% { transform: translateY(0); opacity: .4; } 40% { transform: translateY(-5px); opacity: 1; } }
 
-/* 检索过程条：运行中（紫底实时状态）与完成后（灰底可展开）共用 */
+/* 检索过程条：运行中与完成后均为灰底，点击 header 展开/收起 */
 .step-spinner {
   flex: 0 0 auto;
   width: 13px; height: 13px;
-  border: 2px solid color-mix(in srgb, var(--brand) 25%, transparent);
-  border-top-color: var(--brand);
+  border: 2px solid color-mix(in srgb, var(--ink-3) 35%, transparent);
+  border-top-color: var(--ink-2);
   border-radius: 50%;
   animation: step-spin .7s linear infinite;
 }
@@ -1716,11 +1704,6 @@ button.mobile-only { display: none; }
   background: var(--bg-gray, #f8f9fc);
   overflow: hidden;
 }
-/* 运行中：紫色高亮的实时状态条（点击同样可展开全部步骤） */
-.steps-bar--live {
-  background: color-mix(in srgb, var(--brand) 6%, #fff);
-  border-color: color-mix(in srgb, var(--brand) 18%, transparent);
-}
 .steps-bar__header {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 14px; cursor: pointer;
@@ -1728,26 +1711,33 @@ button.mobile-only { display: none; }
   min-height: 34px;
   transition: background .15s;
 }
-.steps-bar__header:hover { background: color-mix(in srgb, var(--brand) 6%, transparent); }
+.steps-bar__header:hover { background: rgba(0, 0, 0, 0.04); }
 .steps-bar__label { font-weight: 500; }
-/* 运行中滚动阶段信息：最近 4 步常驻可见，证据链清晰（WorkBuddy 风格） */
+/* 运行中滚动阶段信息：最近 4 步常驻可见（黑白灰，运行中步骤加粗） */
 .step-live-roll { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .step-live-row { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.5; min-width: 0; }
-.step-live-row .step-dot { width: 16px; flex: 0 0 auto; text-align: center; font-weight: bold; color: var(--success); display: inline-flex; justify-content: center; align-items: center; }
-.step-live-row:last-child .step-live-title { color: var(--brand); }
-.step-live-title { font-weight: 600; color: var(--brand); flex: 0 0 auto; }
+.step-live-row .step-dot { width: 16px; flex: 0 0 auto; text-align: center; font-weight: bold; color: var(--ink-2); display: inline-flex; justify-content: center; align-items: center; }
+.step-live-title { font-weight: 500; color: var(--ink); flex: 0 0 auto; }
+.step-live-row:last-child .step-live-title { font-weight: 700; }
 .step-live-detail { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.steps-expand-hint { margin-left: auto; flex: 0 0 auto; font-size: 11.5px; color: var(--brand); opacity: .8; }
 .steps-bar__body { padding: 4px 14px 8px; border-top: 1px dashed var(--line); }
 
 /* 步骤条目（展开态） */
 .step-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); padding: 2px 0; }
-.step-item.done { color: var(--success); }
+.step-item.done { color: var(--ink); }
 .step-item .step-dot { width: 16px; text-align: center; font-weight: bold; display: inline-flex; justify-content: center; }
 .step-item .step-title { font-weight: 500; }
 .step-item .step-detail { color: var(--ink-3); }
 
 /* 限时探索确认卡片 */
+/* 证据不足时的知识总结：与普通答案正文同风格，无底色直接铺在页面上 */
+.assess-card {
+  margin-bottom: 8px;
+  font-size: 13.5px; line-height: 1.8;
+  color: var(--ink);
+  word-break: break-word;
+}
+.assess-card strong { color: var(--ink); }
 .choice-card {
   margin-bottom: 8px;
   padding: 12px 14px;
@@ -1758,28 +1748,17 @@ button.mobile-only { display: none; }
 .choice-q { font-size: 13px; color: var(--ink); line-height: 1.7; margin-bottom: 10px; }
 .choice-opts { display: flex; gap: 8px; flex-wrap: wrap; }
 .choice-btn {
-  border: 1px solid color-mix(in srgb, var(--brand) 35%, #fff);
+  border: 1px solid var(--line);
   background: var(--surface);
-  color: var(--brand);
+  color: var(--ink);
   border-radius: 999px;
   padding: 6px 16px;
   font-size: 13px;
   cursor: pointer;
-  transition: all .15s ease;
+  transition: background .15s ease;
 }
-.choice-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--brand) 10%, #fff);
-  transform: translateY(-1px);
-}
-.choice-btn--primary {
-  background: var(--brand);
-  color: var(--brand-ink);
-  border-color: var(--brand);
-}
-.choice-btn--primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--brand) 86%, #000);
-}
-.choice-btn:disabled { cursor: not-allowed; opacity: .55; }
+.choice-btn:hover:not(:disabled) { background: var(--surface-2); }
+.choice-btn:disabled { opacity: .5; cursor: not-allowed; }
 .choice-hint { margin-top: 8px; font-size: 12px; color: var(--ink-3); }
 
 /* 引用来源 */
@@ -1789,10 +1768,10 @@ button.mobile-only { display: none; }
 .refs-toggle { margin-left: 8px; color: var(--brand); cursor: pointer; font-size: 12px; font-weight: 400; }
 .ref { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
 .ref > :not(.ref-title) { flex-shrink: 0; }
-.cite { display: inline-block; background: color-mix(in srgb, var(--brand) 12%, #fff); color: var(--brand); border-radius: 4px; padding: 0 5px; font-size: 11px; }
+.cite { display: inline-block; color: var(--ink-2); font-size: 11px; }
 .ref-title { flex: 1; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ref-page { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
-.doc-tag { display: inline-block; background: color-mix(in srgb, var(--brand) 10%, #fff); color: var(--brand); border-radius: 4px; padding: 0 6px; font-size: 11px; line-height: 18px; }
+.doc-tag { display: inline-block; background: color-mix(in srgb, #409EFF 10%, #fff); color: #409EFF; border-radius: 4px; padding: 0 6px; font-size: 11px; line-height: 18px; }
 .gap-actions { margin-top: 12px; display: flex; gap: 8px; }
 .cfg-tip { background: #fff7e6; border: 1px solid #ffd591; border-radius: 10px; padding: 12px 14px; }
 .cfg-text { color: #ad6800; white-space: pre-line; line-height: 1.8; }
@@ -1800,15 +1779,32 @@ button.mobile-only { display: none; }
 .corr-question { font-size: 13.5px; color: #374151; line-height: 1.6; background: #F9FAFB; border-radius: 6px; padding: 8px 10px; max-height: 80px; overflow-y: auto; }
 .ref-link { text-decoration: none; }
 .ref-link:hover { color: var(--brand); text-decoration: underline; }
-.ref-correct { margin-left: auto; font-size: 11.5px; color: #9CA3AF; cursor: pointer; flex-shrink: 0; }
+.ref-correct { margin-left: auto; font-size: 14px; color: #9CA3AF; cursor: pointer; flex-shrink: 0; }
 .ref-correct:hover { color: #DC2626; }
 .fb-label { font-size: 12px; color: var(--ink-3); }
+/* 反馈图标按钮：有帮助 / 没帮助 / 纠错，仅图标展示 */
+.fb-icon {
+  width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--ink-2); cursor: pointer; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.fb-icon svg { width: 15px; height: 15px; }
+.fb-icon .el-icon { font-size: 15px; }
+.fb-icon:hover:not(:disabled), .fb-icon.active {
+  color: var(--brand); border-color: color-mix(in srgb, var(--brand) 40%, transparent);
+  background: color-mix(in srgb, var(--brand) 8%, transparent);
+}
+.fb-icon:disabled { cursor: default; opacity: .55; }
+.fb-icon.active:disabled { opacity: 1; }
 
 /* ===== 建议问题胶囊 ===== */
 .suggestion-chips {
   flex: 0 0 auto;
   display: flex; gap: 10px; overflow-x: auto;
-  padding: 4px 20px 12px;
+  width: calc(100% - 32px); max-width: 820px; /* 与输入框同宽居中，纵向对齐 */
+  margin: 0 auto;
+  padding: 4px 0 12px;
   scrollbar-width: none;
 }
 .suggestion-chips::-webkit-scrollbar { display: none; }
@@ -1847,7 +1843,7 @@ button.mobile-only { display: none; }
 .input-field {
   flex: 1 1 auto; min-width: 0; border: 0; outline: 0; resize: none;
   background: transparent; color: var(--ink); font-family: inherit;
-  font-size: 15px; line-height: 1.6; padding: 8px 4px; max-height: 140px; min-height: 26px;
+  font-size: 15px; line-height: 1.6; padding: 8px 4px; max-height: 140px; min-height: 110px;
 }
 .input-field::placeholder { color: var(--ink-3); }
 .send-btn {

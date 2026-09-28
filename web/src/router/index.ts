@@ -142,10 +142,32 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '解析原文', hidden: true, roles: ['super_admin', 'admin', 'editor'] },
       },
       {
+        // 知识运营：分组容器（运营看板/问答明细/知识纠错），父级仅作分组，重定向到首个子页
         path: 'operate',
         name: 'Operate',
-        component: () => import('@/views/governance/operate/index.vue'),
+        redirect: '/operate/dashboard',
         meta: { title: '知识运营', icon: 'DataLine', group: 'feature' },
+      },
+      {
+        // 运营看板：原「知识运营」页签独立为二级页
+        path: 'operate/dashboard',
+        name: 'OperateDashboard',
+        component: () => import('@/views/governance/operate/Dashboard.vue'),
+        meta: { title: '运营看板', icon: 'DataLine', group: 'feature', parent: '/operate', menuOrder: 1 },
+      },
+      {
+        // 问答明细：原「知识运营」页签独立为二级页
+        path: 'operate/qa',
+        name: 'OperateQa',
+        component: () => import('@/views/governance/operate/QaDetails.vue'),
+        meta: { title: '问答明细', icon: 'ChatDotRound', group: 'feature', parent: '/operate', menuOrder: 2 },
+      },
+      {
+        // 知识纠错：原「知识运营」页签独立为二级页
+        path: 'operate/corrections',
+        name: 'OperateCorrections',
+        component: () => import('@/views/governance/operate/Corrections.vue'),
+        meta: { title: '知识纠错', icon: 'EditPen', group: 'feature', parent: '/operate', menuOrder: 3 },
       },
       {
         // 知识治理：分组容器（知识缺口/入库审核），父级仅作分组，重定向到首个子页

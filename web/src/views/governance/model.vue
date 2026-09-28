@@ -872,7 +872,7 @@ async function loadMenuConfig() {
         visible: !hidden.includes(r.path),
       }))
     // 保持路由定义顺序
-    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/engine', '/apply', '/operate', '/govern', '/govern/gaps', '/govern/review']
+    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/engine', '/apply', '/operate', '/operate/dashboard', '/operate/qa', '/operate/corrections', '/govern', '/govern/gaps', '/govern/review']
     items.sort((a, b) => {
       const ia = orderedPaths.indexOf(a.path)
       const ib = orderedPaths.indexOf(b.path)

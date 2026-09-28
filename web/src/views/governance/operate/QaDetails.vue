@@ -1,5 +1,5 @@
 <template>
-  <div class="page qa-page">
+  <div class="kge-page qa-page">
     <!-- 过滤栏 -->
     <div class="filter-bar">
       <div class="filter-item">
@@ -258,16 +258,17 @@ onMounted(load)
 </script>
 
 <style scoped>
-.qa-page { padding: 4px 0 24px; }
+/* kge-page 为 flex 纵向容器：过滤栏/分页固定，列表撑满剩余高度并内部滚动（kge-fill 约定） */
 .filter-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
   background: #fff; border: 1px solid var(--line, #E5E7EB); border-radius: 10px;
   padding: 14px 16px; margin-bottom: 14px;
+  flex-shrink: 0;
 }
 .filter-item { display: flex; align-items: center; gap: 8px; }
 .filter-label { font-size: 13.5px; color: #4B5563; white-space: nowrap; }
 
-.qa-list { display: flex; flex-direction: column; gap: 14px; }
+.qa-list { display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; overflow-y: auto; }
 .empty-box { text-align: center; padding: 60px 0; color: #9CA3AF; }
 .empty-text { margin-top: 10px; font-size: 14px; }
 
@@ -365,7 +366,8 @@ a.hit-link:hover { color: #2563EB; text-decoration: underline; }
 
 .pager {
   display: flex; align-items: center; justify-content: flex-end; gap: 14px;
-  margin-top: 18px;
+  margin-top: 14px;
+  flex-shrink: 0;
 }
 .pager-total { font-size: 13.5px; color: #6B7280; }
 </style>
