@@ -184,6 +184,8 @@ rsync -a --exclude '.venv' --exclude '__pycache__' --exclude 'node_modules' \
 #    （与可选 RERANK_API_URL / RERANK_API_KEY / RERANK_MODEL）；
 #    LLM/MinerU Key 也可部署后在「模型配置」页补填
 # 3. 准备前端产物：本地 `cd web && pnpm build`，把 dist/ 上传到 /opt/kge/web/dist（nginx root）
+#    页签图标：web/public/{favicon.ico,favicon.png,apple-touch-icon.png,logo.png}（杰克科技 logo，
+#    由 03_Resource/杰克logo/jack200.png 生成），index.html 已引用；替换 logo 后重新 build 即可
 
 # 4. 基础设施（postgres/redis/elasticsearch/minio/kkfileview）
 cd /opt/kge/deploy/intranet
@@ -583,11 +585,11 @@ docker compose down -v        # 同时删除卷（清空 Dify 数据库与知识
 
 ## 知识运营（原运营看板）
 
-侧边栏「知识运营」（路由 `/operate`）含三个页签：
+侧边栏「知识运营」（路由 `/operate`）为二级菜单分组（重定向到 `/operate/dashboard`），含三个二级页：
 
-- **运营看板**（后端 `app/routes/operate.py`）：知识存储总量/知识数量/热门知识 Top20 的定时统计与持久化。
-- **问答明细**（后端 `app/routes/qa_route.py`，`GET /api/v1/qa/details`）：真实问答流水，块状列表展示用户、问题、回答链路（分类→改写→检索→判定→生成 steps）、召回片段（Score 进度条/文档名/片段内容/片段ID）、点赞/点踩反馈标签；支持按检索时间、检索内容（问题/回答关键词）、用户、反馈类型多维过滤与分页。数据来源：`chat_messages` 表，问答完成时由前端持久化 `detail`（链路 steps + 召回片段快照 + 模型）。**召回片段记录全量召回**（`detail.retrieval` 来自 `final.retrieval_all`，含未被答案引用的分段，每条 `cited` 标记是否被引用）——标题显示「召回 N 条，其中被答案引用 M 条」，逐条带「已引用/未引用」标签，可完整回溯过程中召回了哪些分段（旧数据无 `cited` 字段，仅含最终引用，视为全部已引用）。
-- **知识纠错**（`GET/PUT /api/v1/qa/corrections`）：用户在问答页提交的纠错工单（`qa_feedbacks` 表，feedback_type=correct，错误类型含内容错误/知识重复/知识过期/知识难理解/知识不完整/知识模板错误/其它）；支持按知识标题、错误类型、状态过滤，管理员可处理（处理人自动记录、处理备注、状态流转 待处理→处理中→已解决/已关闭）。**知识标题可点击跳转原文**：钉钉文档（alidocs.dingtalk.com 链接）跳转钉钉知识库对应文档，Dify/本地文档跳转预览页；无链接的历史工单显示纯文本。
+- **运营看板**（`/operate/dashboard`，后端 `app/routes/operate.py`）：知识存储总量/知识数量/热门知识 Top20 的定时统计与持久化。
+- **问答明细**（`/operate/qa`，后端 `app/routes/qa_route.py`，`GET /api/v1/qa/details`）：真实问答流水，块状列表展示用户、问题、回答链路（分类→改写→检索→判定→生成 steps）、召回片段（Score 进度条/文档名/片段内容/片段ID）、点赞/点踩反馈标签；支持按检索时间、检索内容（问题/回答关键词）、用户、反馈类型多维过滤与分页。数据来源：`chat_messages` 表，问答完成时由前端持久化 `detail`（链路 steps + 召回片段快照 + 模型）。**召回片段记录全量召回**（`detail.retrieval` 来自 `final.retrieval_all`，含未被答案引用的分段，每条 `cited` 标记是否被引用）——标题显示「召回 N 条，其中被答案引用 M 条」，逐条带「已引用/未引用」标签，可完整回溯过程中召回了哪些分段（旧数据无 `cited` 字段，仅含最终引用，视为全部已引用）。
+- **知识纠错**（`/operate/corrections`，`GET/PUT /api/v1/qa/corrections`）：用户在问答页提交的纠错工单（`qa_feedbacks` 表，feedback_type=correct，错误类型含内容错误/知识重复/知识过期/知识难理解/知识不完整/知识模板错误/其它）；支持按知识标题、错误类型、状态过滤，管理员可处理（处理人自动记录、处理备注、状态流转 待处理→处理中→已解决/已关闭）。**知识标题可点击跳转原文**：钉钉文档（alidocs.dingtalk.com 链接）跳转钉钉知识库对应文档，Dify/本地文档跳转预览页；无链接的历史工单显示纯文本。
 
 问答页反馈按钮（👍有帮助 / 👎纠错 / ❓没找到想要的）已全部接入真实接口（`POST /api/v1/qa/feedback`），点赞/没找到直接记录。**引用来源旁的「👎 纠错」按钮**可针对单条知识纠错：点击后自动带入该条知识的名称与链接（`knowledge_title`/`knowledge_url`，存入 `qa_feedbacks`，alembic 0010），弹窗中可直接打开原文链接核对；反馈栏的通用纠错按钮不带具体链接。引用来源的文档名本身也可点击（有外链时新窗口打开原文）。
 
