@@ -171,12 +171,17 @@ class XxlJobAdminClient:
         for row in self._rows(page):
             if row.get("appname") == appname:
                 return int(row["id"])
-        # 2.4.x 创建接口为 /jobgroup/save（旧版为 /jobgroup/add），逐个尝试
+        # 创建接口按版本探测：3.x 为 */insert，2.x 为 /jobgroup/save（更旧 /jobgroup/add）
         payload = {"appname": appname, "title": title, "order": 1, "addressType": 0}
-        try:
-            self._post("/jobgroup/save", payload)
-        except XxlJobAdminError:
-            self._post("/jobgroup/add", payload)
+        last_exc: XxlJobAdminError | None = None
+        for path in ("/jobgroup/insert", "/jobgroup/save", "/jobgroup/add"):
+            try:
+                self._post(path, payload)
+                break
+            except XxlJobAdminError as exc:
+                last_exc = exc
+        else:
+            raise last_exc or XxlJobAdminError(f"创建执行器组失败: {appname}")
         page = self._post("/jobgroup/pageList", {"start": 0, "length": 100,
                                                   "appname": appname, "title": ""})
         for row in self._rows(page):
@@ -196,7 +201,17 @@ class XxlJobAdminClient:
         return None
 
     def add_job(self, spec: dict) -> int:
-        result = self._post("/jobinfo/add", spec)
+        # 创建接口按版本探测：3.x 为 /jobinfo/insert，2.x 为 /jobinfo/add
+        result: dict | None = None
+        last_exc: XxlJobAdminError | None = None
+        for path in ("/jobinfo/insert", "/jobinfo/add"):
+            try:
+                result = self._post(path, spec)
+                break
+            except XxlJobAdminError as exc:
+                last_exc = exc
+        if result is None:
+            raise last_exc or XxlJobAdminError("创建作业失败")
         # 2.x 返回 content=<id>；3.x 返回 data=<id>（dict/list 为异常载荷，忽略）
         job_id = result.get("content") or (result.get("data")
                                            if not isinstance(result.get("data"), (dict, list))
@@ -209,13 +224,23 @@ class XxlJobAdminClient:
         self._post("/jobinfo/update", spec)
 
     def start_job(self, job_id: int) -> None:
-        self._post("/jobinfo/start", {"id": job_id})
+        # 2.x 为 id=；3.x 批量接口为 ids[]=（同时携带两个，双版本兼容）
+        self._post("/jobinfo/start", {"id": job_id, "ids[]": str(job_id)})
 
     def stop_job(self, job_id: int) -> None:
-        self._post("/jobinfo/stop", {"id": job_id})
+        self._post("/jobinfo/stop", {"id": job_id, "ids[]": str(job_id)})
 
     def remove_job(self, job_id: int) -> None:
-        self._post("/jobinfo/remove", {"id": job_id})
+        # 3.x 删除接口为 /jobinfo/delete，2.x 为 /jobinfo/remove；均要求 ids[]/id
+        last_exc: XxlJobAdminError | None = None
+        for path, payload in (("/jobinfo/delete", {"ids[]": str(job_id)}),
+                              ("/jobinfo/remove", {"id": job_id})):
+            try:
+                self._post(path, payload)
+                return
+            except XxlJobAdminError as exc:
+                last_exc = exc
+        raise last_exc or XxlJobAdminError(f"删除作业失败: {job_id}")
 
     def trigger_job(self, job_id: int, param: str = "") -> None:
         """控制台「执行一次」同款：手动触发作业（验证执行器链路用）。"""

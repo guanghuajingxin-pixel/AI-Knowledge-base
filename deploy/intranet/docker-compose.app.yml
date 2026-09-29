@@ -10,6 +10,8 @@ services:
     restart: unless-stopped
     ports:
       - "8001:8000"
+      # XXL-Job 执行器回调端口（admin 回调 XXL_JOB_EXECUTOR_IP:9998 → 容器）
+      - "9998:9998"
     env_file: .env.app
     environment:
       MINERU_LOCAL_URL: ""
