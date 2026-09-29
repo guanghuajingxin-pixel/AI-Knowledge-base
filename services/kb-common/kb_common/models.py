@@ -506,6 +506,12 @@ class SyncSource(Base):
     # Dify 的 pipeline/run 接口要求 inputs 携带流水线定义的必填变量，缺失会报 500
     # "xxx is required in input form"。普通数据集忽略此字段。
     pipeline_inputs: Mapped[str] = mapped_column(Text, server_default="{}", nullable=False)
+    # 节点白名单：JSON 数组字符串，限定只同步这些钉钉文档节点（「添加知识」选择
+    # 指定文档 + 自动同步时写入）；为空数组表示同步整棵目录树（历史行为）。
+    node_whitelist: Mapped[str] = mapped_column(Text, server_default="[]", nullable=False)
+    # XXL-Job 调度中心作业 ID（迁移 0029）：同步源为作业配置唯一事实源，
+    # 后端经 admin API 幂等增删改作业，作业 ID 回存本列。
+    xxl_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 同步身份归属：定时/后台同步用该用户的钉钉 unionId 调钉钉 API（迁移 0043）；
     # 为空或该用户未绑定钉钉时回退全局 dingtalk_operator_union_id 服务账号。
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
@@ -705,62 +711,6 @@ class DingtalkBinding(Base):
     __table_args__ = (UniqueConstraint("corp_id", "dt_userid", name="uq_dingtalk_binding_corp_user"),)
 
 
-class StructuredTask(Base):
-    """结构化处理 · 解析任务：文件经 MinerU 解析后的结构化 JSON 留存。
-
-    engine: kit_v1=本地 mineru-kit V1 API(8010) / cloud_v4=MinerU 云 API；
-    status: pending/parsing/completed/failed；content_json 为归一化 content 块数组。
-    """
-    __tablename__ = "structured_tasks"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    file_name: Mapped[str] = mapped_column(String(512))
-    file_ext: Mapped[str] = mapped_column(String(16), default="")
-    engine: Mapped[str] = mapped_column(String(32), default="kit_v1")
-    tier: Mapped[str] = mapped_column(String(32), default="standard")
-    ocr_mode: Mapped[str] = mapped_column(String(16), default="auto")
-    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
-    remote_job_id: Mapped[str | None] = mapped_column(String(128))
-    error: Mapped[str | None] = mapped_column(Text)
-    content_json: Mapped[list | None] = mapped_column(JSON)
-    markdown: Mapped[str | None] = mapped_column(Text)
-    meta: Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
-
-
-class StructuredSchema(Base):
-    """结构化处理 · 表结构 + 字段映射设计。
-
-    target_table: 写入 structured schema 下的表名；
-    row_source: 行源 JSON 路径（默认 content，即每个解析块一行）；
-    columns: [{name, type, path, const}]，path 为行内相对 JSON 路径，const 为常量列。
-    """
-    __tablename__ = "structured_schemas"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(128), unique=True)
-    target_table: Mapped[str] = mapped_column(String(128))
-    row_source: Mapped[str] = mapped_column(String(256), default="content")
-    columns: Mapped[list] = mapped_column(JSON)
-    description: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
-
-
-class StructuredWriteLog(Base):
-    """结构化处理 · 写入历史：目标表、行数、成败。"""
-    __tablename__ = "structured_write_logs"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    schema_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("structured_schemas.id", ondelete="SET NULL"), index=True)
-    task_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("structured_tasks.id", ondelete="SET NULL"))
-    target_table: Mapped[str] = mapped_column(String(128))
-    rows_written: Mapped[int] = mapped_column(Integer, default=0)
-    status: Mapped[str] = mapped_column(String(32), default="success")
-    error: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
-
 class LibraryDocument(Base):
     """Project-owned originals and metadata; engine identifiers stay behind the adapter."""
     __tablename__ = "library_documents"
@@ -791,8 +741,10 @@ class LibraryDocument(Base):
 class LibraryChunk(Base):
     """文档库分段：MinerU 解析产物按库分段规则本地切块的结果。
 
-    父子分段：parent_id 为空 = 父分段（列表/编辑入口）；指向父分段 = 子分段
-    （父子分段规则启用时由分段器生成，仅参与检索命中，不在分段列表展示）。
+    父子分段（Dify parent-child 移植）：parent_id 为空 = 父分段（列表/编辑入口，
+    作为召回上下文）；指向父分段 = 子分段（由分段器生成，是检索单元——向量与
+    词项打分都作用于子块，命中后返回父块）。child_index 为父块内子块序号
+    （父分段为 NULL），供前端稳定展示。
     """
     __tablename__ = "library_chunks"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -802,6 +754,7 @@ class LibraryChunk(Base):
     available: Mapped[bool] = mapped_column(Boolean, default=True)
     important_keywords: Mapped[list] = mapped_column(JSON, default=list)
     position: Mapped[int] = mapped_column(Integer, default=0)
+    child_index: Mapped[int | None] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

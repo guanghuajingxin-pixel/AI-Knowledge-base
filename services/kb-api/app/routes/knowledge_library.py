@@ -57,7 +57,7 @@ async def list_knowledge_libraries(
     s: AsyncSession = Depends(get_session),
 ):
     """知识库镜像列表：问答页/统一检索等所有「选择知识库」处从此接口取数。"""
-    q = select(KnowledgeLibrary)
+    q = select(KnowledgeLibrary).where(KnowledgeLibrary.library_type != "material")
     if enabled_only:
         q = q.where(KnowledgeLibrary.enabled == True)  # noqa: E712
     q = q.order_by(KnowledgeLibrary.platform, KnowledgeLibrary.id.desc())
@@ -110,6 +110,8 @@ async def update_knowledge_library(
     if lib is None:
         raise HTTPException(404, "知识库不存在")
     data = payload.model_dump(exclude_unset=True)
+    if lib.library_type == "material":
+        raise HTTPException(409, "物料库请通过物料库管理入口修改")
     if lib.library_type == "document" and set(data) - {"enabled"}:
         raise HTTPException(409, "项目文档库的名称和设置请通过文档库设置接口修改")
     if "name" in data:
@@ -134,7 +136,7 @@ async def delete_knowledge_library(
     lib = await s.get(KnowledgeLibrary, library_id)
     if lib is None:
         raise HTTPException(404, "知识库不存在")
-    if lib.library_type == "document":
+    if lib.library_type in {"document", "material"}:
         raise HTTPException(409, "项目文档库请先停用并导出归档，不能通过外部镜像接口移除")
     await s.delete(lib)
     await s.commit()
@@ -145,18 +147,20 @@ class RetrievalTestIn(BaseModel):
     query: str = Field(max_length=2000)
     # 空 = 全部登记的知识库（含停用，便于排查）；也可指定子集
     library_ids: list[int] = Field(default_factory=list)
-    top_k: int = Field(default=8, ge=1, le=50)
+    # 检索参数均可缺省：缺省时文档库按「知识库设置-检索设置」(engine_config.retrieval)
+    # 取库级默认，外部库（Dify/RAGFlow）回落全局默认（hybrid / top_k=8 / 无阈值）
+    top_k: int | None = Field(None, ge=1, le=50)
     # 检索模式：hybrid=混合检索（RAGFlow 按权重/rerank 排序，Dify=hybrid_search）、
     # vector=向量检索（weight=1.0 / semantic_search）、fulltext=全文检索（weight=0.0 / full_text_search）
-    mode: Literal["hybrid", "vector", "fulltext"] = "hybrid"
+    mode: Literal["hybrid", "vector", "fulltext"] | None = None
     # 混合检索 + Rerank 子策略时的 RAGFlow rerank 模型名（如 bge--reranker-v2–m3）
-    rerank_id: str | None = Field(default=None, max_length=200)
+    rerank_id: str | None = Field(None, max_length=200)
     document_ids: list[str] = Field(default_factory=list, max_length=100)
-    rerank: bool = False
+    rerank: bool | None = None
     rerank_model_id: UUID | None = None
     # 阈值作用于最终分数；向量权重作用于本地和 RAGFlow 的混合检索。
-    similarity_threshold: float | None = Field(default=None, ge=0, le=1)
-    vector_similarity_weight: float | None = Field(default=None, ge=0, le=1)
+    similarity_threshold: float | None = Field(None, ge=0, le=1)
+    vector_similarity_weight: float | None = Field(None, ge=0, le=1)
 
 
 async def _eff_setting(s: AsyncSession, key: str) -> str:
@@ -192,7 +196,7 @@ async def retrieval_test(body: RetrievalTestIn,
     if not body.query.strip():
         raise HTTPException(422, "检索词不能为空")
 
-    q = select(KnowledgeLibrary)
+    q = select(KnowledgeLibrary).where(KnowledgeLibrary.library_type != "material")
     if body.library_ids:
         q = q.where(KnowledgeLibrary.id.in_(body.library_ids))
     libs = (await s.execute(q.order_by(KnowledgeLibrary.platform, KnowledgeLibrary.id))).scalars().all()
@@ -207,17 +211,22 @@ async def retrieval_test(body: RetrievalTestIn,
     settings.ragflow_api_key = await _eff_setting(s, "ragflow_api_key")
 
     started = _time.monotonic()
+    # 全局默认（外部库/未配置检索设置的库）：与历史行为一致（hybrid / top_k=8 / 无阈值 / 不重排）
+    g_mode = body.mode or "hybrid"
+    g_top_k = body.top_k or 8
+    g_rerank = bool(body.rerank)
     # 模式 → 引擎参数映射：
     # RagFlow：向量检索 weight=1.0、全文检索 weight=0.0、混合检索用默认/显式权重 + 可选 rerank 模型；
     # Dify：hybrid_search / semantic_search / full_text_search（Rerank 仍由知识库自身配置决定）
-    ragflow_weight = {"vector": 1.0, "fulltext": 0.0}.get(body.mode)
+    ragflow_weight = {"vector": 1.0, "fulltext": 0.0}.get(g_mode)
     # 混合检索-权重设置子策略：透传前端显式向量权重（0~1，语义=向量权重，全文权重=1-该值）
-    if body.mode == "hybrid" and body.vector_similarity_weight is not None:
+    if g_mode == "hybrid" and body.vector_similarity_weight is not None:
         ragflow_weight = body.vector_similarity_weight
-    ragflow_rerank = body.rerank_id if (body.mode == "hybrid" and body.rerank_id) else None
-    dify_method = {"hybrid": "hybrid_search", "vector": "semantic_search", "fulltext": "full_text_search"}[body.mode]
+    ragflow_rerank = body.rerank_id if (g_mode == "hybrid" and body.rerank_id) else None
+    dify_method = {"hybrid": "hybrid_search", "vector": "semantic_search", "fulltext": "full_text_search"}[g_mode]
     lib_report: list[dict] = []
     hits: list[dict] = []
+    max_top_k = g_top_k  # 各库生效 top_k 的最大值：多库合并后按此截取，避免库级配置被全局默认截掉
     for lib in libs:
         entry = {"library_id": lib.id, "name": lib.name, "platform": lib.platform,
                  "dataset_id": lib.dataset_id, "enabled": lib.enabled,
@@ -225,17 +234,31 @@ async def retrieval_test(body: RetrievalTestIn,
         try:
             if lib.library_type == "document":
                 # 项目文档库：真实向量与词项评分，过滤后排序、父段去重。
+                # 未显式传参的检索参数按库级「检索设置」(engine_config.retrieval) 取默认。
+                rcfg = (lib.engine_config or {}).get("retrieval") or {}
+                eff_mode = body.mode or rcfg.get("mode") or "hybrid"
+                eff_top_k = body.top_k or rcfg.get("top_k") or 8
+                max_top_k = max(max_top_k, eff_top_k)
+                eff_threshold = body.similarity_threshold if body.similarity_threshold is not None \
+                    else float(rcfg.get("score_threshold") or 0.0)
+                eff_weight = body.vector_similarity_weight if body.vector_similarity_weight is not None \
+                    else float(rcfg.get("vector_weight") or 0.7)
+                eff_rerank = body.rerank if body.rerank is not None else bool(rcfg.get("rerank"))
+                eff_rerank_model = str(body.rerank_model_id) if body.rerank_model_id else \
+                    (str(rcfg["rerank_model_id"]) if rcfg.get("rerank_model_id") else None)
+                entry |= {"mode": eff_mode, "top_k": eff_top_k, "score_threshold": eff_threshold,
+                          "vector_weight": eff_weight, "rerank": eff_rerank}
                 lib_hits = await _search_document_library(
-                    s, lib, body.query, body.top_k, body.mode,
+                    s, lib, body.query, eff_top_k, eff_mode,
                     document_ids=[str(d) for d in body.document_ids],
-                    threshold=body.similarity_threshold or 0.0,
-                    vector_weight=body.vector_similarity_weight if body.vector_similarity_weight is not None else 0.7,
-                    rerank=body.rerank,
-                    rerank_model_id=str(body.rerank_model_id) if body.rerank_model_id else None)
+                    threshold=eff_threshold,
+                    vector_weight=eff_weight,
+                    rerank=eff_rerank,
+                    rerank_model_id=eff_rerank_model)
             elif lib.platform == "ragflow":
                 r = await ragflow_client.retrieve_with_report(
-                    [lib.dataset_id], body.query, top_k=max(100, body.top_k * 5) if body.rerank else body.top_k,
-                    similarity_threshold=0 if body.rerank else body.similarity_threshold,
+                    [lib.dataset_id], body.query, top_k=max(100, g_top_k * 5) if g_rerank else g_top_k,
+                    similarity_threshold=0 if g_rerank else (body.similarity_threshold or 0.0),
                     vector_similarity_weight=ragflow_weight,
                     rerank_id=ragflow_rerank or "",
                     document_ids=[str(d) for d in body.document_ids])
@@ -243,19 +266,19 @@ async def retrieval_test(body: RetrievalTestIn,
                     raise ValueError(r["skipped"][0]["error"])
                 lib_hits = r["hits"]
             else:
-                lib_hits = await dify_client.retrieve([lib.dataset_id], body.query, top_k=max(100, body.top_k * 5) if body.rerank else body.top_k,
+                lib_hits = await dify_client.retrieve([lib.dataset_id], body.query, top_k=max(100, g_top_k * 5) if g_rerank else g_top_k,
                                                       search_method=dify_method, rerank=False, score_threshold=0)
             if lib.library_type != "document":
                 if body.document_ids and lib.platform != "ragflow":
                     raise ValueError("该外部引擎暂不支持文档范围检索")
-                if body.rerank and lib_hits:
+                if g_rerank and lib_hits:
                     from app.services.library_retrieval import rerank_hits
                     for hit in lib_hits:
                         hit['matched_content'] = hit['content']
                     await rerank_hits(s, body.query, lib_hits,
                                       str(body.rerank_model_id) if body.rerank_model_id else None)
                 lib_hits = sorted((h for h in lib_hits if h['score'] >= (body.similarity_threshold or 0)),
-                                  key=lambda h: h['score'], reverse=True)[:body.top_k]
+                                  key=lambda h: h['score'], reverse=True)[:g_top_k]
             for h in lib_hits:
                 hits.append({**h, "library_id": lib.id, "library_name": lib.name})
             entry["ok"] = True
@@ -265,10 +288,10 @@ async def retrieval_test(body: RetrievalTestIn,
         lib_report.append(entry)
 
     hits.sort(key=lambda x: x.get("score") or 0.0, reverse=True)
-    hits = hits[:body.top_k]
+    hits = hits[:max_top_k]
     return {
         "query": body.query,
-        "top_k": body.top_k,
+        "top_k": max_top_k,
         "elapsed_ms": int((_time.monotonic() - started) * 1000),
         "libraries": lib_report,
         "hits": hits,

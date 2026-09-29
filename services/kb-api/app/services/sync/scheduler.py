@@ -188,6 +188,17 @@ def trigger_source_sync(source_id: int, operator: str = "") -> dict:
             "message": "同步任务已提交调度中心（XXL-Job），进度见同步队列，执行日志见调度控制台"}
 
 
+def trigger_first_sync(source_id: int, operator: str = "") -> None:
+    """同步源创建后的首次同步：进程内直跑，绕过 XXL-Job 往返。
+
+    用户预期「创建后立即开始同步」，而 admin→执行器回调存在间歇性失败
+    （开发态热重载窗口/网络抖动），首次同步不走调度往返、直跑最可靠；
+    后续周期同步仍由 cron（XXL-Job）驱动。run_sync 自带文件锁防并发。
+    """
+    from .engine import run_sync as direct_run
+    _direct_executor.submit(direct_run, source_id, "manual", operator)
+
+
 def reload_sync_jobs() -> int:
     """同步源 CRUD 后调用：幂等全量对齐作业配置。调度关闭时为 no-op。"""
     if not get_settings().xxl_job_enabled:

@@ -43,7 +43,6 @@ KEYS = {
     "dingtalk_corp_id": ("钉钉 corpId（H5 免登）", False),
     "dingtalk_bot_enabled": ("钉钉机器人开关（true/false）", False),
     "dingtalk_bot_allow_users": ("钉钉机器人白名单（userid 逗号分隔，空=全员）", False),
-    "structured_db_url": ("结构化处理写入目标库连接串（postgresql://…；留空=跟随系统数据库）", False),
 }
 
 
@@ -280,10 +279,13 @@ async def test_dingtalk_api(body: TestDingtalkIn, u=Depends(require_role("super_
     if not union_id:
         return {"ok": False, "message": "请先填写操作人 UnionId"}
 
-    # 用测试参数临时覆盖运行时配置（含缓存 token 的凭证指纹校验），结束后恢复
-    st = get_settings()
-    backup = (st.dingtalk_app_key, st.dingtalk_app_secret, st.dingtalk_operator_union_id)
-    st.dingtalk_app_key, st.dingtalk_app_secret, st.dingtalk_operator_union_id = app_key, app_secret, union_id
+    # 用测试参数临时覆盖运行时配置。注意必须走 dingtalk_client.configure() 注入：
+    # _cfg() 的优先级是 _injected(DB) > .env，直接改 get_settings() 会被 DB 里的
+    # 旧凭证挡住（曾导致“改配置→测试仍用旧应用→403→无法保存”的死锁）。
+    # configure() 在凭证变化时会同时清 token / 知识库列表缓存，避免复用旧 token。
+    old_injected = {k: dingtalk_client._injected.get(k, "") for k in
+                    ("dingtalk_app_key", "dingtalk_app_secret", "dingtalk_operator_union_id")}
+    dingtalk_client.configure(app_key, app_secret, union_id)
     t0 = time.perf_counter()
     try:
         await dingtalk_client._get_access_token()
@@ -295,7 +297,15 @@ async def test_dingtalk_api(body: TestDingtalkIn, u=Depends(require_role("super_
     except Exception as e:
         return {"ok": False, "message": f"连接失败：{e}"}
     finally:
-        st.dingtalk_app_key, st.dingtalk_app_secret, st.dingtalk_operator_union_id = backup
+        # 恢复原注入值：configure() 忽略空串，空值需直接删键，避免测试值残留
+        for k, v in old_injected.items():
+            if v:
+                dingtalk_client._injected[k] = v
+            else:
+                dingtalk_client._injected.pop(k, None)
+        dingtalk_client._token_cache["token"] = ""
+        dingtalk_client._token_cache["expire_at"] = 0.0
+        dingtalk_client.invalidate_workspaces_cache()
     latency_ms = int((time.perf_counter() - t0) * 1000)
     return {"ok": True, "latency_ms": latency_ms, "workspace_count": len(workspaces),
             "message": f"验证通过，操作人可见 {len(workspaces)} 个知识库"}

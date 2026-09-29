@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { defaultSettings, settingsFromConfig, settingsToConfig, librarySettingsFromConfig } from '../index-settings'
+import { defaultSettings, settingsFromConfig, settingsToConfig, librarySettingsFromConfig,
+  defaultRetrievalSettings, retrievalFromConfig } from '../index-settings'
 import type { DocumentIndexConfig, ProcessingConfig } from '@/api/document-library'
 
 const libProcessing = (over: Partial<ProcessingConfig> = {}): ProcessingConfig => ({
   chunk_method: 'naive', layout_recognize: 'DeepDOC', chunk_token_num: 512, delimiter: '\n。！？；',
   embedding_model: '', overlap: 25, replace_whitespace: false, remove_urls_emails: false,
-  enable_children: false, children_delimiter: '\n', auto_keywords: 0, auto_questions: 0, ...over,
+  enable_children: false, children_delimiter: '\n', parent_mode: 'paragraph', children_chunk_token_num: 200,
+  auto_keywords: 0, auto_questions: 0, ...over,
 })
 
 describe('settingsFromConfig', () => {
@@ -94,11 +96,26 @@ describe('settingsToConfig 策略隔离', () => {
     expect(cfg.processing.enable_children).toBe(false)
   })
 
-  it('parent_child：naive + enable_children + 子分段标识符', () => {
-    const cfg = settingsToConfig({...defaultSettings(), strategy: 'parent_child', children_delimiter: '\n\n'})
+  it('parent_child：naive + enable_children + 父块模式/子块配置', () => {
+    const cfg = settingsToConfig({...defaultSettings(), strategy: 'parent_child', children_delimiter: '\n\n',
+      parent_mode: 'fulltext', children_chunk_token_num: 300})
     expect(cfg.processing.chunk_method).toBe('naive')
     expect(cfg.processing.enable_children).toBe(true)
     expect(cfg.processing.children_delimiter).toBe('\n\n')
+    expect(cfg.processing.parent_mode).toBe('fulltext')
+    expect(cfg.processing.children_chunk_token_num).toBe(300)
+    // 库级回填：父块模式与子块限长完整还原
+    const restored = librarySettingsFromConfig(cfg)
+    expect(restored.parent_mode).toBe('fulltext')
+    expect(restored.children_chunk_token_num).toBe(300)
+  })
+
+  it('parent_child 旧配置缺省时父块模式回落段落、子块限长回落 200', () => {
+    const legacy = {processing: libProcessing({enable_children: true}), strategy: 'parent_child',
+      enhancements: {}, type_rules: {}} as DocumentIndexConfig
+    const s = librarySettingsFromConfig(legacy)
+    expect(s.parent_mode).toBe('paragraph')
+    expect(s.children_chunk_token_num).toBe(200)
   })
 
   it('策略切换无残留：父子 → 自动后 enable_children 归零', () => {
@@ -115,5 +132,26 @@ describe('settingsToConfig 策略隔离', () => {
     const custom = settingsToConfig({...reopened, strategy: 'custom', method: 'paper'})
     expect(custom.processing.chunk_method).toBe('paper')
     expect(custom.processing.enable_children).toBe(false)
+  })
+})
+
+describe('retrievalFromConfig 库级检索设置', () => {
+  it('空配置回落默认（混合 + 权重 0.7 + top_k 8）', () => {
+    const s = retrievalFromConfig(null)
+    expect(s).toEqual(defaultRetrievalSettings())
+    expect(s.mode).toBe('hybrid')
+    expect(s.rerank).toBe(false)
+    expect(s.vector_weight).toBe(0.7)
+  })
+
+  it('已存配置逐项覆盖（全文 + Rerank + 阈值）', () => {
+    const s = retrievalFromConfig({mode: 'fulltext', rerank: true, rerank_model_id: 'abc',
+      top_k: 20, score_threshold: 0.35})
+    expect(s.mode).toBe('fulltext')
+    expect(s.rerank).toBe(true)
+    expect(s.rerank_model_id).toBe('abc')
+    expect(s.top_k).toBe(20)
+    expect(s.score_threshold).toBe(0.35)
+    expect(s.vector_weight).toBe(0.7)  // 未配置项保持默认
   })
 })

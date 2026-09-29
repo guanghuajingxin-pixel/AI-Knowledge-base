@@ -61,17 +61,14 @@
     </div>
 
     <!-- 分页 -->
-    <div v-if="total > 0" class="pager">
-      <span class="pager-total">共 {{ total }} 条</span>
-      <el-pagination
-        background
-        layout="prev, pager, next"
-        :total="total"
-        :page-size="pageSize"
-        :current-page="page"
-        @current-change="onPageChange"
-      />
-    </div>
+    <KgPagination
+      v-if="total > 0"
+      :page="page"
+      :size="pageSize"
+      :total="total"
+      @update:page="onPageChange"
+      @update:size="onPageSizeChange"
+    />
 
     <!-- 详情弹窗 -->
     <el-dialog v-model="detailVisible" title="纠错详情" width="560px">
@@ -125,6 +122,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import KgPagination from '@/components/common/KgPagination.vue'
 import { getCorrections, updateCorrection, type CorrectionItem } from '@/api/qa'
 
 const loading = ref(false)
@@ -179,6 +177,11 @@ function onPageChange(p: number) {
   page.value = p
   load()
 }
+function onPageSizeChange(s: number) {
+  pageSize.value = s
+  page.value = 1
+  load()
+}
 
 function viewDetail(row: CorrectionItem) {
   current.value = row
@@ -230,10 +233,4 @@ a.kb-link:hover { color: #2563EB; text-decoration: underline; }
 .kb-q { font-size: 12px; color: #9CA3AF; margin-top: 2px; }
 .detail-content { white-space: pre-wrap; line-height: 1.6; }
 .handle-title { font-weight: 600; color: #374151; }
-.pager {
-  display: flex; align-items: center; justify-content: flex-end; gap: 14px;
-  margin-top: 14px;
-  flex-shrink: 0;
-}
-.pager-total { font-size: 13.5px; color: #6B7280; }
 </style>

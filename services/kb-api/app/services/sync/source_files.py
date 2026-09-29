@@ -4,6 +4,9 @@ from pathlib import Path
 from kb_common.clients.document_upload import UPLOAD_EXTENSIONS, supported_dify_extensions
 from .export_service import ONLINE_TYPES, safe_name
 
+# 本地文档库（document-libraries）支持的扩展名，与 managed_library.upload 校验一致
+LIBRARY_EXTENSIONS = {"pdf", "docx", "txt", "md", "csv", "xlsx", "pptx", "html"}
+
 
 def node_extension(node: dict) -> str:
     return str(node.get("extension") or Path(node.get("name") or "").suffix).lower().lstrip(".")
@@ -33,10 +36,17 @@ def skip_reason(node: dict, settings, runtime: str) -> str:
         return "扩展名在跳过列表，不处理"
     if online_type(node) or not ext:
         return ""
-    allowed = (UPLOAD_EXTENSIONS if runtime == "rag_pipeline"
-               else supported_dify_extensions(settings.dify_etl_type))
+    if runtime == "library":
+        allowed = LIBRARY_EXTENSIONS
+        hint = "文档库"
+    elif runtime == "rag_pipeline":
+        allowed = UPLOAD_EXTENSIONS
+        hint = "流水线文件上传"
+    else:
+        allowed = supported_dify_extensions(settings.dify_etl_type)
+        hint = f"ETL={settings.dify_etl_type}"
     if ext not in allowed:
-        return f"目标知识库不支持 .{ext} 格式（{'流水线文件上传' if runtime == 'rag_pipeline' else 'ETL=' + settings.dify_etl_type}）"
+        return f"目标知识库不支持 .{ext} 格式（{hint}）"
     return ""
 
 

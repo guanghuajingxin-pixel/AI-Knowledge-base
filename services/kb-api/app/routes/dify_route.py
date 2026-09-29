@@ -1,5 +1,5 @@
-"""Dify 知识库相关接口：列出/新建数据集、上传文档。"""
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+"""Dify 知识库相关接口：列出/新建数据集、钉钉文档同步。"""
+from fastapi import APIRouter, Depends, HTTPException
 from typing import Any
 from pydantic import BaseModel
 import httpx
@@ -190,55 +190,6 @@ async def create_dify_dataset(body: DatasetIn,
         raise HTTPException(502, f"Dify 新建知识库失败：{e}")
     invalidate_datasets_cache()   # 否则前端刷新列表会命中缓存、看不到刚建的库
     return {"id": d.get("id"), "name": d.get("name") or name}
-
-
-@router.post("/datasets/{dataset_id}/documents")
-@track_transfer("upload")
-async def upload_dify_document(dataset_id: str,
-                               file: UploadFile,
-                               pipeline_inputs: str | None = Form(default=None),
-                               u=Depends(require_role("super_admin", "admin")),
-                               s: AsyncSession = Depends(get_session)):
-    """上传文档到指定 Dify 知识库（自动分段索引）。
-
-    pipeline_inputs 为可选的 JSON 字符串，携带 Dify 流水线数据集的 input form
-    变量值（分段参数，如 {"max_chunk_length": 1024, "parent_mode": "full_doc"}）。
-    流水线数据集缺失必填变量时 Dify 会报 500 "xxx is required in input form"；
-    普通数据集忽略此参数。
-    """
-    if not dataset_id:
-        raise HTTPException(400, "请先选择目标知识库")
-    base_url, api_key = await _runtime_config(s)
-    _require_config(base_url, api_key)
-    inputs: dict | None = None
-    if (pipeline_inputs or "").strip():
-        import json as _json
-        try:
-            parsed = _json.loads(pipeline_inputs)
-            if not isinstance(parsed, dict):
-                raise ValueError("expected JSON object")
-            inputs = parsed
-        except (ValueError, TypeError):
-            raise HTTPException(400, "pipeline_inputs 不是合法的 JSON 对象")
-    from app.services.sync.dify_pipeline_vars import prepare_inputs_for_dataset
-    try:
-        inputs = await asyncio.to_thread(prepare_inputs_for_dataset, dataset_id, inputs)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(502, f"读取 Dify 流水线参数失败：{exc}") from exc
-    content = await file.read(max_upload_bytes() + 1)
-    try:
-        filename, content = prepare_document(file.filename or "untitled", content)
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
-    try:
-        result = await dify_client.upload_document(dataset_id, filename, content, inputs=inputs)
-    except Exception as e:
-        raise HTTPException(502, f"Dify 上传文档失败：{e}")
-    doc = result.get("document") or {}
-    return {"document_id": doc.get("id"), "name": doc.get("name") or file.filename,
-            "batch": result.get("batch")}
 
 
 class SyncDingTalkIn(BaseModel):

@@ -10,6 +10,6 @@ class EngineError(Exception):
 
 
 from .ragflow import RagflowEngine  # noqa: E402
-from .mineru import MinerUEngine, job_state  # noqa: E402
+from .mineru import MinerUEngine, MinerUCloudEngine, job_state  # noqa: E402
 
-__all__ = ["EngineError", "RagflowEngine", "MinerUEngine", "job_state"]
+__all__ = ["EngineError", "RagflowEngine", "MinerUEngine", "MinerUCloudEngine", "job_state"]

@@ -13,6 +13,9 @@ services:
     env_file: .env.app
     environment:
       MINERU_LOCAL_URL: ""
+      # 文档库解析引擎：留空 → 走 MinerU 云 SaaS（Key 在「模型配置」页/settings 表），
+      # 非空则指向本地 mineru-kit V1（http://host:8010）。生产未部署本地 kit，故留空。
+      STRUCTURED_KIT_BASE_URL: ""
     volumes:
       - kb-api-data:/app/services/kb-api/data
     networks: [kge-network]

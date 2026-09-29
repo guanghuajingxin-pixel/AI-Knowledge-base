@@ -53,12 +53,9 @@ class Settings(BaseSettings):
     # 本地 MinerU 解析引擎（mineru-api 常驻服务，见 services/mineru）；
     # 置空字符串可禁用本地引擎、强制走云 API。
     mineru_local_url: str = "http://127.0.0.1:2028"
-    # 结构化处理使用的 mineru-kit V1 API（可取 structured_content 结构化 JSON）；
+    # mineru-kit V1 API（解析引擎本地通道，可取 structured_content 结构化 JSON）；
     # 置空字符串则页内仅可选 MinerU 云 API 通道。
     structured_kit_base_url: str = "http://127.0.0.1:8010"
-    # 结构化处理【写入目标库】连接串（postgresql://user:pass@host:port/db）；
-    # 留空=跟随系统 database_url。运行时可被 settings 表 structured_db_url 覆盖。
-    structured_db_url: str = ""
 
     # LLM（默认 GLM；DeepSeek 同协议）
     llm_base_url: str = "https://open.bigmodel.cn/api/paas/v4"

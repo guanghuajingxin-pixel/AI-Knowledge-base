@@ -153,8 +153,8 @@ class SyncSourceBase(BaseModel):
     workspace_id: str
     root_node_id: str
     start_dir: str = ""
-    # 目标引擎：dify | ragflow（默认 dify，历史行为不变）
-    backend_type: str = Field(default="dify", pattern="^(dify|ragflow)$")
+    # 目标引擎：dify | ragflow | library（默认 dify，历史行为不变）
+    backend_type: str = Field(default="dify", pattern="^(dify|ragflow|library)$")
     # 目标知识库标识（对 dify 存 dataset_id/name，对 ragflow 存其 dataset_id/name）
     dify_dataset_name: str
     dify_dataset_id: str | None = None
@@ -164,6 +164,9 @@ class SyncSourceBase(BaseModel):
     # 流水线数据集的 input form 变量值（分段参数），如 {"max_chunk_length": 1024}。
     # 普通数据集忽略；流水线数据集缺失必填变量时 Dify 会报 500。RAGFlow 忽略此字段。
     pipeline_inputs: dict[str, Any] = Field(default_factory=dict)
+    # 节点白名单：限定只同步这些钉钉文档节点（「添加知识」选择指定文档 + 自动同步）；
+    # 空数组表示同步整棵目录树（历史行为）。
+    node_whitelist: list[str] = Field(default_factory=list)
     # 同步身份归属用户：定时/后台同步用该用户的钉钉 unionId 调钉钉 API；
     # 为空回退全局服务账号。创建时不传默认取当前登录用户。
     owner_user_id: str | None = None
@@ -183,13 +186,14 @@ class SyncSourceUpdate(BaseModel):
     workspace_id: str | None = None
     root_node_id: str | None = None
     start_dir: str | None = None
-    backend_type: str | None = Field(default=None, pattern="^(dify|ragflow)$")
+    backend_type: str | None = Field(default=None, pattern="^(dify|ragflow|library)$")
     dify_dataset_name: str | None = None
     dify_dataset_id: str | None = None
     delete_policy: str | None = Field(default=None, pattern="^(keep|sync)$")
     cron: str | None = None
     enabled: bool | None = None
     pipeline_inputs: dict[str, Any] | None = None
+    node_whitelist: list[str] | None = None
     owner_user_id: str | None = None
 
 
@@ -225,6 +229,29 @@ class SyncSourceOut(SyncSourceBase):
             return parsed if isinstance(parsed, dict) else {}
         except (ValueError, TypeError):
             return {}
+
+    @field_validator("node_whitelist", mode="before")
+    @classmethod
+    def _parse_node_whitelist(cls, value: Any) -> list[str]:
+        """ORM 里 node_whitelist 是 Text 存的 JSON 字符串，序列化时转回 list。"""
+        import json as _json
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return value
+        try:
+            parsed = _json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except (ValueError, TypeError):
+            return []
+
+    @field_validator("owner_user_id", mode="before")
+    @classmethod
+    def _coerce_owner_user_id(cls, value: Any) -> str | None:
+        """ORM 里 owner_user_id 是 UUID，序列化时转为字符串。"""
+        if value is None:
+            return None
+        return str(value)
 
 
 class SyncRunOut(BaseModel):

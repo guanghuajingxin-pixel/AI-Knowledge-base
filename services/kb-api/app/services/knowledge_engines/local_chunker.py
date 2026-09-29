@@ -30,8 +30,14 @@
   2+ 连续空格/制表符（含全角空格）折叠为单空格（保留换行结构，不影响标题
   识别）；后者删除所有电子邮箱地址与 http(s) 裸 URL（markdown 链接/图片
   整体占位保护后还原，避免链接文字/图片引用被误删）；
-- enable_children：父分段按 children_delimiter 切子块（子块行 parent_id 指向
-  父分段，列表页只展示父分段）；仅 naive 生效；
+- enable_children（Dify parent-child 移植，仅 naive 生效）：父块作召回上下文，
+  子块是检索单元（向量与词项打分均作用于子块，子块行 parent_id 指向父分段）；
+  - parent_mode=paragraph：父块按 delimiter 集合切段（≤ 限长原样保留，段落结构
+    优先不合并），超长段按 Dify 兜底分隔符递归细分并滚动合并（带 overlap）；
+  - parent_mode=fulltext：整篇文档作为单个父块（超 10000 Token 截断）；
+  - children_delimiter / children_chunk_token_num：父块内按子分隔符切子块，
+    相邻短块合并、超长子块递归细分（Dify subchunk_segmentation 语义）；
+  - 子块总是生成（≥1，单子块即父块整体作为检索单元）；
 - auto_keywords / auto_questions：引擎侧生成能力，本地解析不生成，忽略；
 - layout_recognize：MinerU 恒做版面识别，该选项保留在配置中但不区分行为。
 
@@ -171,6 +177,25 @@ def est_tokens(text: str) -> int:
         return 0
     ascii_len = sum(1 for ch in text if ord(ch) < 128)
     return (len(text) - ascii_len) + (ascii_len + 3) // 4
+
+
+# 全文父块上限：整篇作父块时的超长保护（与参考实现对齐）
+_PARENT_FULLTEXT_TOKEN_LIMIT = 10000
+
+
+def _truncate_tokens(text: str, limit: int = _PARENT_FULLTEXT_TOKEN_LIMIT) -> str:
+    """按 token 估算截断（全文父块超长保护，截断处补省略提示）。"""
+    if est_tokens(text) <= limit:
+        return text
+    out: list[str] = []
+    used = 0.0
+    for ch in text:
+        t = 0.25 if ord(ch) < 128 else 1
+        if used + t > limit:
+            break
+        out.append(ch)
+        used += t
+    return "".join(out).rstrip() + "\n…（内容超长，已截断）"
 
 
 def _split_sentences(text: str, delimiters: str) -> list[str]:
@@ -449,9 +474,193 @@ def _auto_chunk(text: str, delimiters: str, limit: int, overlap: int = 0) -> lis
     return chunks
 
 
+# ===== Dify 父子分段移植（dify/api/core/rag/splitter/fixed_text_splitter.py）=====
+# FixedRecursiveCharacterTextSplitter：fixed_separator 切大块（≤ limit 的块原样保留，
+# 段落结构优先），超长块按 separators 优先级递归切分 + _merge_splits 滚动合并
+# （闭合块时从头部弹出直至 ≤ overlap，形成下一块的重叠前缀）。
+# 本地适配：长度用 est_tokens；表格占位是原子单元（单独成块、不进字符滑窗）。
+
+_DIFY_FALLBACK_SEPARATORS = ["\n\n", "。", ". ", " ", ""]
+
+
+def _dify_merge_splits(splits: list[str], separator: str, limit: int, overlap: int) -> list[str]:
+    """Dify TextSplitter._merge_splits 移植：滚动合并到 limit，闭合块后保留头部 ≤ overlap 的重叠。"""
+    sep_len = est_tokens(separator)
+    docs: list[str] = []
+    current: list[str] = []
+    total = 0
+    for d in splits:
+        d_len = est_tokens(d)
+        if total + d_len + (sep_len if current else 0) > limit:
+            if current:
+                text = separator.join(current).strip()
+                if text:
+                    docs.append(text)
+                # 从头部弹出直至 ≤ overlap（或放不下新单元），形成下一块的重叠前缀
+                while total > overlap or (total + d_len + (sep_len if current else 0) > limit and total > 0):
+                    total -= est_tokens(current[0]) + (sep_len if len(current) > 1 else 0)
+                    current = current[1:]
+        current.append(d)
+        total += d_len + (sep_len if len(current) > 1 else 0)
+    if current:
+        text = separator.join(current).strip()
+        if text:
+            docs.append(text)
+    return docs
+
+
+def _dify_recursive_split(text: str, separators: list[str], limit: int, overlap: int) -> list[str]:
+    """Dify FixedRecursiveCharacterTextSplitter.recursive_split_text 移植：
+    取 separators 中第一个存在于文本的分隔符切分（keep_separator=False，合并时以分隔符回接），
+    短单元走 _merge_splits 合并、超长单元用下一级分隔符递归，无分隔符命中时按字符滑窗。"""
+    final_chunks: list[str] = []
+    separator = separators[-1]
+    new_separators: list[str] = []
+    for i, s in enumerate(separators):
+        if s == "":
+            separator = s
+            break
+        if s in text:
+            separator = s
+            new_separators = separators[i + 1:]
+            break
+    if separator:
+        splits = re.split(r" +", text) if separator == " " else text.split(separator)
+    else:
+        splits = list(text)
+    if separator == "\n":
+        splits = [s for s in splits if s != ""]
+    else:
+        splits = [s for s in splits if s not in {"", "\n"}]
+    if separator != "":
+        good_splits: list[str] = []
+        for s in splits:
+            if _TABLE_PH_ANY_RE.search(s):
+                # 本地适配：表格占位原子——先闭合已聚合单元，占位整体单独成块（表格后强制分段）
+                if good_splits:
+                    final_chunks.extend(_dify_merge_splits(good_splits, separator, limit, overlap))
+                    good_splits = []
+                final_chunks.append(s)
+                continue
+            if est_tokens(s) < limit:
+                good_splits.append(s)
+            else:
+                if good_splits:
+                    final_chunks.extend(_dify_merge_splits(good_splits, separator, limit, overlap))
+                    good_splits = []
+                if not new_separators:
+                    final_chunks.append(s)
+                else:
+                    final_chunks.extend(_dify_recursive_split(s, new_separators, limit, overlap))
+        if good_splits:
+            final_chunks.extend(_dify_merge_splits(good_splits, separator, limit, overlap))
+    else:
+        # 无分隔符命中：字符滑窗（本地适配：含表格占位时不滑窗，整体返回宁可超长）
+        if _TABLE_PH_ANY_RE.search(text):
+            return [text]
+        current, current_len = "", 0.0
+        overlap_part, overlap_len = "", 0.0
+        for ch in text:
+            ch_len = 1 if not ch.isascii() else 0.25
+            if current_len + ch_len <= limit - overlap:
+                current += ch
+                current_len += ch_len
+            elif current_len + ch_len <= limit:
+                current += ch
+                current_len += ch_len
+                overlap_part += ch
+                overlap_len += ch_len
+            else:
+                final_chunks.append(current)
+                current = overlap_part + ch
+                current_len = ch_len + overlap_len
+                overlap_part, overlap_len = "", 0.0
+        if current:
+            final_chunks.append(current)
+    return final_chunks
+
+
+def _dify_split_chunk(text: str, fixed_separator: str, separators: list[str],
+                      limit: int, overlap: int = 0) -> list[str]:
+    """Dify FixedRecursiveCharacterTextSplitter.split_text 移植：
+    fixed_separator 切大块（≤ limit 的块原样保留，段落结构优先；本地化改进：分隔符
+    保留在块尾保证句读完整），超长块递归细分。"""
+    chunks = _split_by_any(text, fixed_separator) if fixed_separator else [text]
+    final_chunks: list[str] = []
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        if est_tokens(chunk) > limit and not _TABLE_PH_ANY_RE.search(chunk):
+            final_chunks.extend(_dify_recursive_split(chunk, separators, limit, overlap))
+        else:
+            final_chunks.append(chunk.strip())
+    return [c for c in final_chunks if c.strip()]
+
+
+def _split_by_any(text: str, delimiters: str) -> list[str]:
+    """按分隔符切分并保留在单元尾部（本地化改进：句读完整——Dify 原版 split 丢弃
+    分隔符，中文句号切句会丢标点）。'\n\n' 在集合中时作为整体分隔符（段落级）优先：
+    先按段落切、段内不再按单 '\n' 拆（对齐 Dify fixed_separator='\n\n' 语义）。"""
+    if not delimiters:
+        return [text]
+    if "\n\n" in delimiters and "\n\n" in text:
+        parts = re.split(r"(\n\n)", text)
+        units = [parts[i] + (parts[i + 1] if i + 1 < len(parts) else "") for i in range(0, len(parts), 2)]
+        return [u for u in units if u]
+    parts = re.split(f"([{re.escape(delimiters)}])", text)
+    out: list[str] = []
+    for i in range(0, len(parts), 2):
+        unit = parts[i] + (parts[i + 1] if i + 1 < len(parts) else "")
+        if unit:
+            out.append(unit)
+    return out
+
+
+def _dify_split_any(text: str, delimiters: str, limit: int, overlap: int) -> list[str]:
+    """Dify split_text 的分隔符集合版（父块切分）：取集合中优先级最高且存在于文本的
+    分隔符作 fixed_separator（'\n\n' 段落级整体优先于 '\n' 行级，对齐 Dify 单选语义），
+    ≤ limit 的段原样保留（段落结构优先不合并），超长段按其余标识符 + Dify 兜底递归细分。"""
+    cands: list[str] = ["\n\n"] if "\n\n" in delimiters else []
+    for ch in delimiters:
+        if ch == "\n" and "\n\n" in delimiters:
+            continue  # 段落级已覆盖行级
+        if ch and ch not in cands:
+            cands.append(ch)
+    fixed = next((c for c in cands if c in text), "")
+    rest = [c for c in cands if c != fixed]
+    rest += [s for s in _DIFY_FALLBACK_SEPARATORS if s not in cands]
+    return _dify_split_chunk(text, fixed, rest, limit, overlap)
+
+
+def _parent_child_chunks(text: str, tables: list[str], delimiters: str, limit: int, overlap: int,
+                         child_delim: str, child_limit: int, parent_mode: str) -> list[dict]:
+    """Dify 父子分段（ParentChildIndexProcessor.transform 移植）。
+
+    - paragraph：父块 = 按分段标识符集合切段（≤ limit 的段原样保留，段落结构优先不
+      合并），超长段按 Dify 兜底分隔符递归细分（滚动合并至 limit，带 overlap）；
+      fulltext：整篇作为单个父块（超 10000 Token 截断）。
+    - 子块：每个父块内按 children_delimiter 切分（fixed_separator，短块原样保留、
+      超长块递归细分合并，目标长度 children_chunk_token_num）——Dify
+      subchunk_segmentation 语义。
+    - 子块是检索单元（向量与词项打分均作用于子块），父块作为召回上下文；子块总是生成
+      （对齐 Dify：child chunks ≥ 1，单子块即父块整体作为检索单元）。
+    """
+    def split_children(parent: str) -> list[str]:
+        return [c for c in _dify_split_chunk(parent, child_delim, list(_DIFY_FALLBACK_SEPARATORS), child_limit) if c.strip()]
+
+    if parent_mode == "fulltext":
+        children = [_restore_tables(c, tables) for c in split_children(text)]
+        return [{"content": _truncate_tokens(_restore_tables(text, tables)), "children": children}]
+    result = []
+    for parent in _dify_split_any(text, delimiters, limit, overlap):
+        children = [_restore_tables(c, tables) for c in split_children(parent)]
+        result.append({"content": _restore_tables(parent, tables), "children": children})
+    return result
+
+
 def chunk_markdown(md: str, cfg: dict) -> list[dict]:
     """按分段规则切块。返回 [{"content": str, "children": [str] | None}]，
-    顺序即 position；children 仅在父子分段启用且子块多于 1 个时给出。"""
+    顺序即 position；父子分段启用时 children 为该父块的子块列表（≥1，检索单元）。"""
     text = _pre_process(clean_markdown(md), cfg)
     if not text:
         return []
@@ -466,6 +675,13 @@ def chunk_markdown(md: str, cfg: dict) -> list[dict]:
     # 分段重叠度：缺省 25（与 Pydantic/前端默认一致），并夹取到 limit-1 以内
     raw_overlap = cfg.get("overlap")
     overlap = min(max(0, int(raw_overlap)), limit - 1) if raw_overlap is not None else min(25, limit - 1)
+    # 父子分段：Dify parent-child 移植路径（独立于 naive/auto 的常规切分）
+    if bool(cfg.get("enable_children")) and method == "naive":
+        return _parent_child_chunks(
+            text, tables, delimiters, limit, overlap,
+            cfg.get("children_delimiter") or "\n",
+            max(1, int(cfg.get("children_chunk_token_num") or 200)),
+            str(cfg.get("parent_mode") or "paragraph").lower())
     if method == "auto":
         chunks = _auto_chunk(text, delimiters, limit, overlap)
     else:
@@ -485,16 +701,4 @@ def chunk_markdown(md: str, cfg: dict) -> list[dict]:
                 cur = []  # 表格结束强制分段：下一分段不带表格内容、不带重叠尾
         if cur:
             chunks.append("".join(cur).strip())
-
-    enable_children = bool(cfg.get("enable_children")) and method == "naive"
-    child_delim = cfg.get("children_delimiter") or "\n"
-    result = []
-    for chunk in chunks:
-        children = None
-        if enable_children:
-            # 先按子分隔符切、再逐块还原：占位符独立成行，子块切割不会破坏表格
-            pieces = [p.strip() for p in chunk.split(child_delim) if p.strip()]
-            if len(pieces) > 1:
-                children = [_restore_tables(p, tables) for p in pieces]
-        result.append({"content": _restore_tables(chunk, tables), "children": children})
-    return result
+    return [{"content": _restore_tables(chunk, tables), "children": None} for chunk in chunks]

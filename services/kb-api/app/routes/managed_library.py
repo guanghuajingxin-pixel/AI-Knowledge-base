@@ -17,7 +17,7 @@ from sqlalchemy import select, func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import require_role, get_current_user
-from app.services.knowledge_engines import EngineError, MinerUEngine, job_state
+from app.services.knowledge_engines import EngineError, MinerUEngine, MinerUCloudEngine, job_state
 from app.services.knowledge_engines.local_chunker import chunk_markdown
 from kb_common.config import get_settings
 from kb_common.database import get_session
@@ -44,6 +44,10 @@ class ProcessingConfig(BaseModel):
 
     enable_children: bool = False
     children_delimiter: str = Field("\n", min_length=1, max_length=100)
+    # 父子分段增强：父块模式（paragraph=分段作父块 / fulltext=整篇作父块，超 10000 Token 截断）
+    parent_mode: Literal["paragraph", "fulltext"] = "paragraph"
+    # 父子分段：子块最大长度——按子分隔符切出后超长子块在句界再细切
+    children_chunk_token_num: int = Field(200, ge=1, le=2048)
     auto_keywords: int = Field(0, ge=0, le=32)
     auto_questions: int = Field(0, ge=0, le=10)
 
@@ -54,6 +58,20 @@ class ProcessingConfig(BaseModel):
         return self
 
 
+class RetrievalConfig(BaseModel):
+    """库级检索设置（知识库设置-检索设置）：保存后立即生效。
+
+    检索测试未显式传参时按此取库级默认；mode=hybrid 时 rerank 与权重设置互斥
+    （rerank=False 即权重设置子策略，vector_weight 为语义权重，关键词权重=1-该值）。
+    """
+    mode: Literal["hybrid", "vector", "fulltext"] = "hybrid"
+    vector_weight: float = Field(0.7, ge=0, le=1)
+    rerank: bool = False
+    rerank_model_id: str = Field("", max_length=64)
+    top_k: int = Field(8, ge=1, le=50)
+    score_threshold: float = Field(0.0, ge=0, le=1)
+
+
 class LibraryIn(ProcessingConfig):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field("", max_length=2000)
@@ -61,6 +79,8 @@ class LibraryIn(ProcessingConfig):
     strategy: Literal["auto", "custom", "parent_child", "by_file_type"] = "auto"
     enhancements: dict[str, bool] = Field(default_factory=dict)
     type_rules: dict = Field(default_factory=dict)
+    # 库级检索设置（仅知识库级；文档级不单独设置检索参数）
+    retrieval: RetrievalConfig | None = None
 
     @field_validator("name")
     @classmethod
@@ -96,6 +116,22 @@ class DocumentEnabledIn(BaseModel):
     enabled: bool
 
 
+class StagingDiscardIn(BaseModel):
+    """丢弃暂存文件：staging_id 列表（UUID，防路径注入）。"""
+    staging_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+
+
+class StagedFileIn(BaseModel):
+    """确认入库载荷项：暂存上传返回的原样回传（staging_id 定位暂存对象）。"""
+    staging_id: uuid.UUID
+    name: str = Field(min_length=1, max_length=500)
+    size: int = Field(ge=0)
+
+
+class StagingCommitIn(BaseModel):
+    items: list[StagedFileIn] = Field(min_length=1, max_length=50)
+
+
 class DocumentConfigIn(BaseModel):
     """文档级索引设置：strategy 为前端策略视图，processing 为解析生效的最终分段参数。"""
     processing: ProcessingConfig
@@ -114,12 +150,22 @@ async def library(s, library_id, lock=False):
     return lib
 
 
-def engine() -> MinerUEngine:
-    """文档库解析引擎：本地 MinerU（mineru-kit V1，STRUCTURED_KIT_BASE_URL）。"""
-    try:
-        return MinerUEngine(get_settings().structured_kit_base_url)
-    except EngineError as exc:
-        raise HTTPException(503, str(exc)) from exc
+def engine() -> "MinerUEngine | MinerUCloudEngine":
+    """文档库解析引擎选择：
+
+    - 显式配置 STRUCTURED_KIT_BASE_URL（非空）→ 本地 mineru-kit V1；
+    - 留空 → 云端 SaaS（复用 mineru_saas，Key 取 settings 表 > .env）。
+
+    生产（10.10.166.2 等）未部署本地 kit，靠留空 STRUCTURED_KIT_BASE_URL 走云，
+    与 mineru_route 的 DEFAULT_BASE=cloud、「模型配置」页 MinerU Key 一致。
+    """
+    base = (get_settings().structured_kit_base_url or "").strip()
+    if base:
+        try:
+            return MinerUEngine(base)
+        except EngineError as exc:
+            raise HTTPException(503, str(exc)) from exc
+    return MinerUCloudEngine()
 
 
 async def invoke(call):
@@ -130,21 +176,24 @@ async def invoke(call):
 
 
 def _library_engine_config(body: LibraryIn) -> dict:
-    """库级 engine_config：processing（解析生效参数）+ 策略视图（strategy/enhancements/type_rules）。"""
-    return {"processing": body.model_dump(exclude={"name", "description", "strategy", "enhancements", "type_rules"}),
-            "strategy": body.strategy, "enhancements": body.enhancements, "type_rules": body.type_rules}
+    """库级 engine_config：processing（解析生效参数）+ 策略视图 + 检索设置。"""
+    return {"processing": body.model_dump(exclude={"name", "description", "strategy", "enhancements", "type_rules", "retrieval"}),
+            "strategy": body.strategy, "enhancements": body.enhancements, "type_rules": body.type_rules,
+            "retrieval": body.retrieval.model_dump() if body.retrieval else {}}
 
 
 def _library_config(lib) -> dict:
-    """库级配置输出：与文档级 {processing, strategy, enhancements, type_rules} 结构对齐；
-    旧库未存 strategy 时按 processing 推导（父子 → parent_child，auto → auto，否则 custom）。"""
+    """库级配置输出：与文档级 {processing, strategy, enhancements, type_rules} 结构对齐
+    （外加库级 retrieval 检索设置）；旧库未存 strategy 时按 processing 推导
+    （父子 → parent_child，auto → auto，否则 custom）。"""
     cfg = lib.engine_config or {}
     processing = cfg.get("processing") or {}
     strategy = cfg.get("strategy") or (
         "parent_child" if processing.get("enable_children")
         else "auto" if processing.get("chunk_method") == "auto" else "custom")
     return {"processing": processing, "strategy": strategy,
-            "enhancements": cfg.get("enhancements") or {}, "type_rules": cfg.get("type_rules") or {}}
+            "enhancements": cfg.get("enhancements") or {}, "type_rules": cfg.get("type_rules") or {},
+            "retrieval": cfg.get("retrieval") or {}}
 
 
 def lib_out(lib, count=0):
@@ -224,16 +273,30 @@ async def list_documents(library_id: int, s: AsyncSession = Depends(get_session)
     return [doc_out(doc) for doc in docs]
 
 
+_ALLOWED_UPLOAD_EXTS = {"pdf", "docx", "txt", "md", "csv", "xlsx", "pptx", "html"}
+_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+
+def _validated_upload_name(filename: str | None) -> str:
+    """上传文件名校验：取 basename、限长、限扩展名（暂存上传与确认入库共用）。"""
+    name = (filename or "").replace("\\", "/").split("/")[-1]
+    if not name or len(name) > 500:
+        raise HTTPException(422, "文件名为空或超过 500 字符")
+    if name.rsplit(".", 1)[-1].lower() not in _ALLOWED_UPLOAD_EXTS:
+        raise HTTPException(422, "不支持的文件类型")
+    return name
+
+
+def _staging_prefix(library_id: int, staging_id) -> str:
+    return f"document-libraries/{library_id}/staging/{staging_id}/"
+
+
 @router.post("/{library_id}/documents")
 async def upload(library_id: int, file: UploadFile = File(...), s: AsyncSession = Depends(get_session)):
     await library(s, library_id)
-    name = (file.filename or "").replace("\\", "/").split("/")[-1]
-    if not name or len(name) > 500:
-        raise HTTPException(422, "文件名为空或超过 500 字符")
-    if name.rsplit(".", 1)[-1].lower() not in {"pdf", "docx", "txt", "md", "csv", "xlsx", "pptx", "html"}:
-        raise HTTPException(422, "不支持的文件类型")
-    content = await file.read(64 * 1024 * 1024 + 1)
-    if not content or len(content) > 64 * 1024 * 1024:
+    name = _validated_upload_name(file.filename)
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if not content or len(content) > _MAX_UPLOAD_BYTES:
         raise HTTPException(413, "请上传非空且不超过 64 MB 的文件")
     from kb_common.clients import minio_client
     doc_id = uuid.uuid4()
@@ -259,6 +322,198 @@ async def upload(library_id: int, file: UploadFile = File(...), s: AsyncSession 
     return doc_out(doc)
 
 
+@router.post("/{library_id}/staging")
+async def stage_upload(library_id: int, file: UploadFile = File(...), s: AsyncSession = Depends(get_session)):
+    """本地文件暂存上传：仅落 MinIO 暂存区，不建文档记录、不触发解析。
+
+    「添加知识」弹窗选中文件即调用；点确定走 /documents/commit 入库并自动解析，
+    取消/关闭弹窗走 /staging/discard 清理暂存对象。
+    """
+    await library(s, library_id)
+    name = _validated_upload_name(file.filename)
+    content = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if not content or len(content) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "请上传非空且不超过 64 MB 的文件")
+    from kb_common.clients import minio_client
+    staging_id = uuid.uuid4()
+    key = f"{_staging_prefix(library_id, staging_id)}{name}"
+    await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW, key, content)
+    return {"staging_id": str(staging_id), "name": name, "size": len(content)}
+
+
+@router.post("/{library_id}/staging/discard")
+async def staging_discard(library_id: int, body: StagingDiscardIn, s: AsyncSession = Depends(get_session)):
+    """丢弃暂存文件：按 staging_id 删除 MinIO 暂存区对象（幂等，对象不存在不报错）。"""
+    await library(s, library_id)
+    from kb_common.clients import minio_client
+
+    def remove_all():
+        for sid in body.staging_ids:
+            minio_client.delete_prefix(minio_client.RAW, _staging_prefix(library_id, sid))
+    await asyncio.to_thread(remove_all)
+    return {"ok": True, "discarded": len(body.staging_ids)}
+
+
+@router.post("/{library_id}/documents/commit")
+async def staging_commit(library_id: int, body: StagingCommitIn, s: AsyncSession = Depends(get_session)):
+    """确认暂存文件入库：暂存对象迁移到正式路径 → 建文档记录 → 自动解析。
+
+    逐项处理互不阻断；迁移/入库失败的项目清理其暂存对象并记入 errors，
+    解析失败沿用单文件上传语义（文档置 FAILED，可手动重新解析）。
+    """
+    await library(s, library_id)
+    from kb_common.clients import minio_client
+    results, errors = [], []
+    for item in body.items:
+        try:
+            name = _validated_upload_name(item.name)
+        except HTTPException as exc:
+            errors.append(f"{item.name}: {exc.detail}")
+            continue
+        staging_prefix = _staging_prefix(library_id, item.staging_id)
+        doc_id = uuid.uuid4()
+        key = f"document-libraries/{library_id}/{doc_id}/{name}"
+        try:
+            def migrate():
+                minio_client.copy_object(minio_client.RAW, f"{staging_prefix}{name}", minio_client.RAW, key)
+                minio_client.delete_prefix(minio_client.RAW, staging_prefix)
+            await asyncio.to_thread(migrate)
+            doc = LibraryDocument(id=doc_id, library_id=library_id, name=name, storage_path=key,
+                                  size=item.size, status="UPLOADED", progress=0, message="", chunk_count=0)
+            s.add(doc)
+            await s.commit()
+            await s.refresh(doc)
+            try:
+                await _do_parse(s, library_id, doc_id)
+                await s.refresh(doc)
+            except Exception:
+                doc.status, doc.message = "FAILED", "自动解析失败，请重新解析"
+                await s.commit()
+                await s.refresh(doc)
+            results.append(doc_out(doc))
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+            try:
+                await asyncio.to_thread(minio_client.delete_prefix, minio_client.RAW, staging_prefix)
+            except Exception:
+                pass  # 清理失败容忍：暂存前缀隔离，不影响正式数据
+    return {"documents": results, "errors": errors}
+
+
+class DingTalkImportIn(BaseModel):
+    """钉钉导入请求体：指定文档节点列表 或 整个知识库。"""
+    node_ids: list[str] = Field(default_factory=list, description="钉钉文档节点 ID 列表")
+    workspace_id: str = Field("", description="钉钉知识库 ID（整库导入时必填）")
+    root_node_id: str = Field("", description="知识库根节点 ID（整库导入时必填）")
+    import_mode: Literal["once", "sync"] = Field("once", description="once=一次性导入, sync=自动同步")
+
+
+@router.post("/{library_id}/import-dingtalk")
+async def import_dingtalk(library_id: int, body: DingTalkImportIn,
+                          s: AsyncSession = Depends(get_session)):
+    """从钉钉知识库导入文档到文档库。
+
+    支持两种模式：
+    - 指定文档：传 node_ids 列表
+    - 整库导入：传 workspace_id + root_node_id，递归遍历所有文档
+    """
+    await library(s, library_id)
+
+    if not body.node_ids and not body.root_node_id:
+        raise HTTPException(422, "请指定钉钉文档节点或知识库")
+
+    # 获取钉钉客户端
+    from app.services.sync.sync_database import SyncSessionLocal
+    from app.services.sync.sync_settings import make_dingtalk_client
+    from app.services.sync.source_files import fetch_source_file
+    from kb_common.clients import minio_client
+    import tempfile
+    from pathlib import Path
+
+    with SyncSessionLocal() as sync_db:
+        dt = make_dingtalk_client(sync_db)
+
+    try:
+        # 确定要导入的节点列表
+        nodes_to_import: list[dict] = []
+        if body.node_ids:
+            # 指定文档模式：逐个获取节点信息
+            for nid in body.node_ids:
+                try:
+                    resp = dt.get_node(nid)
+                    node = resp.get("node") or resp
+                    node["nodeId"] = nid
+                    nodes_to_import.append(node)
+                except Exception as e:
+                    raise HTTPException(400, f"获取钉钉节点 {nid} 失败：{e}")
+        else:
+            # 整库模式：递归遍历
+            from kb_common.config import get_settings as gs
+            settings = gs()
+            nodes_to_import = dt.walk_tree(body.root_node_id,
+                                           settings.sync_max_depth,
+                                           settings.sync_max_results_per_page,
+                                           use_cache=False)
+
+        if not nodes_to_import:
+            raise HTTPException(400, "未找到可导入的钉钉文档")
+
+        # 逐个下载并创建文档
+        results = []
+        errors = []
+        with tempfile.TemporaryDirectory(prefix="dingtalk-import-") as tmp:
+            tmp_path = Path(tmp)
+            for node in nodes_to_import:
+                node_id = node.get("nodeId") or node.get("node_id", "")
+                name = node.get("name", node_id)
+                try:
+                    # 下载/导出钉钉文件
+                    local_file = fetch_source_file(dt, node, tmp_path)
+                    content = local_file.read_bytes()
+                    file_name = local_file.name
+
+                    # 检查文件类型是否支持
+                    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+                    if ext not in {"pdf", "docx", "txt", "md", "csv", "xlsx", "pptx", "html"}:
+                        errors.append(f"{name}: 不支持的文件类型 .{ext}")
+                        continue
+
+                    # 上传到 MinIO
+                    doc_id = uuid.uuid4()
+                    key = f"document-libraries/{library_id}/{doc_id}/{file_name}"
+                    await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW, key, content)
+
+                    # 创建文档记录（source=dingtalk：钉钉知识库同步来源，与本地上传区分）
+                    doc = LibraryDocument(id=doc_id, library_id=library_id, name=file_name,
+                                          storage_path=key, size=len(content), source="dingtalk",
+                                          status="UPLOADED", progress=0, message="", chunk_count=0)
+                    s.add(doc)
+                    await s.commit()
+                    await s.refresh(doc)
+
+                    # 触发解析
+                    try:
+                        await _do_parse(s, library_id, doc_id)
+                        await s.refresh(doc)
+                    except Exception:
+                        doc.status, doc.message = "FAILED", "自动解析失败，请重新解析"
+                        await s.commit()
+                        await s.refresh(doc)
+
+                    results.append(doc_out(doc))
+                except Exception as e:
+                    errors.append(f"{name}: {e}")
+
+        return {
+            "imported": len(results),
+            "failed": len(errors),
+            "errors": errors[:10],  # 最多返回 10 条错误
+            "documents": results,
+        }
+    finally:
+        dt.close()
+
+
 async def bound_document(s, library_id, doc_id, lock=False):
     lib = await library(s, library_id, lock=lock)
     q = select(LibraryDocument).where(LibraryDocument.id == doc_id, LibraryDocument.library_id == library_id)
@@ -270,11 +525,43 @@ async def bound_document(s, library_id, doc_id, lock=False):
     return lib, doc
 
 
+# 「按文件类型」未命中/自动规则的回落配置（与前端 auto 策略口径一致）
+_AUTO_PROCESSING = {"chunk_method": "auto", "chunk_token_num": 512, "delimiter": "\n。！？；",
+                    "overlap": 25, "enable_children": False}
+
+
+def _type_rule_processing(rule: dict | None, base: dict) -> dict:
+    """「按文件类型」规则 → 生效 processing：未命中/auto 规则回落自动；
+    custom/parent_child 规则在库级基础上覆盖方法/长度/分隔符等关键键。"""
+    if not rule or rule.get("strategy") == "auto":
+        return {**base, **_AUTO_PROCESSING}
+    merged = {**base, "enable_children": False}
+    if rule.get("delimiter"):
+        merged["delimiter"] = rule["delimiter"]
+    if rule.get("chunk_token_num"):
+        merged["chunk_token_num"] = int(rule["chunk_token_num"])
+    if rule.get("children_delimiter"):
+        merged["children_delimiter"] = rule["children_delimiter"]
+    if rule.get("strategy") == "parent_child":
+        merged["chunk_method"] = "naive"
+        merged["enable_children"] = True
+    else:  # custom：规则指定的分段方式
+        merged["chunk_method"] = rule.get("method") or "naive"
+    return merged
+
+
 def _processing_for(lib, doc) -> dict:
-    """分段生效配置：文档级 engine_config.processing 逐键覆盖库级（空值除外，避免清空库配置），缺省回退库级。"""
-    merged = dict(lib.engine_config.get("processing") or {})
-    override = dict((doc.engine_config or {}).get("processing") or {})
+    """分段生效配置：文档级 engine_config.processing 逐键覆盖库级（空值除外，避免清空库配置），
+    缺省回退库级；库级「按文件类型」策略按文档扩展名路由 type_rules（未命中回落自动），
+    文档级单独设置过策略时不路由（文档设置弹窗不展示按文件类型）。"""
+    lib_cfg = lib.engine_config or {}
+    doc_cfg = doc.engine_config or {}
+    merged = dict(lib_cfg.get("processing") or {})
+    override = dict(doc_cfg.get("processing") or {})
     merged.update({k: v for k, v in override.items() if v not in ("", None)})
+    if not doc_cfg.get("strategy") and lib_cfg.get("strategy") == "by_file_type":
+        ext = doc.name.rsplit(".", 1)[-1].lower() if "." in doc.name else ""
+        merged = _type_rule_processing((lib_cfg.get("type_rules") or {}).get(ext), merged)
     return merged
 
 
@@ -300,9 +587,10 @@ async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict, p
         count += 1
         if piece["children"]:
             await s.flush()  # 需要 parent.id 建立父子关系
-            for text in piece["children"]:
+            for child_index, text in enumerate(piece["children"]):
                 s.add(LibraryChunk(document_id=doc.id, parent_id=parent.id, content=text,
-                                   available=True, important_keywords=[], position=position))
+                                   available=True, important_keywords=[], position=position,
+                                   child_index=child_index))
     doc.status, doc.progress = "COMPLETED", 1.0
     doc.message = "部分内容解析失败，请检查分段" if partial else ""
     doc.chunk_count = count
@@ -382,7 +670,7 @@ async def _store_images(doc, images: dict[str, bytes]):
     await asyncio.to_thread(upload_all)
 
 
-async def _finalize_parse(adapter: MinerUEngine, s: AsyncSession, lib, doc, job: dict):
+async def _finalize_parse(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncSession, lib, doc, job: dict):
     """job 完成后的落地动作：下载产物（优先 zip，含图片）→ 图片落 MinIO → 按文档生效规则分段。"""
     try:
         markdown, images = _extract_zip_bundle(await invoke(adapter.zip_bundle(job)))
@@ -396,7 +684,7 @@ async def _finalize_parse(adapter: MinerUEngine, s: AsyncSession, lib, doc, job:
                         partial=str(job.get("status", "")).lower() == "partial")
 
 
-async def refresh_state(adapter: MinerUEngine, s: AsyncSession, lib, doc):
+async def refresh_state(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncSession, lib, doc):
     """同步文档状态：查询 MinerU job；首次完成时执行本地分段（幂等，
     仅从 PARSING 状态迁出时落地，避免重复下载/重复分段）。"""
     if not doc.engine_job_id:
@@ -685,7 +973,17 @@ async def chunks(library_id: int, doc_id: uuid.UUID, page: int = Query(1, ge=1),
     rows = (await s.execute(select(LibraryChunk).where(*where)
         .order_by(LibraryChunk.position, LibraryChunk.created_at)
         .offset((page - 1) * size).limit(size))).scalars().all()
-    return {"chunks": [chunk_out(c) for c in rows], "total": total}
+    # 子分段随父分段返回（父子分段：子块是检索单元，父块作召回上下文；前端在父卡片内展示）
+    children_map: dict = {}
+    if rows:
+        child_rows = (await s.execute(select(LibraryChunk).where(
+            LibraryChunk.document_id == doc.id,
+            LibraryChunk.parent_id.in_([c.id for c in rows]))
+            .order_by(LibraryChunk.parent_id, LibraryChunk.child_index.nulls_last(),
+                      LibraryChunk.created_at))).scalars().all()
+        for child in child_rows:
+            children_map.setdefault(child.parent_id, []).append(chunk_out(child))
+    return {"chunks": [chunk_out(c) | {"children": children_map.get(c.id, [])} for c in rows], "total": total}
 
 
 @router.post("/{library_id}/documents/{doc_id}/chunks")

@@ -47,13 +47,15 @@ export interface SourcePayload {
   workspace_id: string
   root_node_id: string
   start_dir?: string
-  /** 目标引擎：dify | ragflow */
-  backend_type?: 'dify' | 'ragflow'
+  /** 目标引擎：dify | ragflow | library（本地文档库） */
+  backend_type?: 'dify' | 'ragflow' | 'library'
   dify_dataset_name: string
   delete_policy: 'keep' | 'sync'
   cron: string
   enabled: boolean
   pipeline_inputs: Record<string, any>
+  /** 节点白名单：限定只同步这些钉钉文档节点；空数组=同步整棵目录树 */
+  node_whitelist?: string[]
 }
 
 /** Dify 流水线 input form 单个变量的 schema（来自 workflows.rag_pipeline_variables） */

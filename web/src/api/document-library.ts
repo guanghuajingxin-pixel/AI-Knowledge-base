@@ -2,6 +2,7 @@ import request from './request'
 export interface ProcessingConfig {
   chunk_method: string; layout_recognize: string; chunk_token_num: number; delimiter: string; embedding_model: string; enable_children: boolean; children_delimiter: string; auto_keywords: number; auto_questions: number;
   overlap: number; replace_whitespace: boolean; remove_urls_emails: boolean
+  parent_mode: 'paragraph' | 'fulltext'; children_chunk_token_num: number
 }
 export interface DocumentLibrary {
   id: number; name: string; description: string; enabled: boolean; document_count: number; creator?: string; config: DocumentIndexConfig; created_at: string
@@ -15,31 +16,53 @@ export interface LibraryDocument {
 }
 export interface Enhancements { include_filename: boolean; auto_summary: boolean; auto_questions: boolean; image_caption: boolean }
 export interface TypeRule { strategy: 'auto' | 'custom' | 'parent_child'; method: string; chunk_token_num: number; delimiter: string; children_delimiter: string }
+/** 库级检索设置（知识库设置-检索设置，存于 engine_config.retrieval） */
+export interface RetrievalConfig {
+  mode: 'hybrid' | 'vector' | 'fulltext'
+  vector_weight: number
+  rerank: boolean
+  rerank_model_id: string
+  top_k: number
+  score_threshold: number
+}
 export interface DocumentIndexConfig {
   processing: ProcessingConfig
   strategy: 'auto' | 'custom' | 'parent_child' | 'by_file_type'
   enhancements: Partial<Enhancements>
   type_rules: Record<string, TypeRule>
+  retrieval?: Partial<RetrievalConfig>
 }
-export interface LibraryChunk { id: string; content: string; available: boolean; important_keywords: string[]; positions?: number[][] }
+/** 文档库分段：parent_id 为空 = 父分段；children 为该父分段的子分段（父子分段模式下
+子块是检索单元——向量与词项打分均作用于子块，命中后返回父块作上下文）。 */
+export interface LibraryChunk { id: string; content: string; available: boolean; important_keywords: string[]; positions?: number[][]; parent_id?: string | null; children?: LibraryChunk[] }
 export interface LibraryChunkInput { content: string; available: boolean; important_keywords: string[]; insert_before?: string; insert_after?: string }
 const root = '/document-libraries'
 export const listDocumentLibraries = () => request.get<unknown, DocumentLibrary[]>(root)
-/** 创建/编辑知识库载荷：processing 扁平字段 + 策略视图（与文档级 DocumentConfigIn 对齐）。 */
+/** 创建/编辑知识库载荷：processing 扁平字段 + 策略视图 + 库级检索设置（与文档级 DocumentConfigIn 对齐）。 */
 export type LibrarySavePayload = ProcessingConfig & {
   name: string; description: string
   strategy: DocumentIndexConfig['strategy']
   enhancements: DocumentIndexConfig['enhancements']
   type_rules: DocumentIndexConfig['type_rules']
+  retrieval: RetrievalConfig
 }
 export const saveDocumentLibrary = (data: LibrarySavePayload, id?: number) => id
   ? request.put<unknown, DocumentLibrary>(`${root}/${id}`, data)
   : request.post<unknown, DocumentLibrary>(root, data)
 export const listLibraryDocuments = (id: number) => request.get<unknown, LibraryDocument[]>(`${root}/${id}/documents`)
-export const uploadLibraryDocument = (id: number, file: File) => {
+/** 暂存上传结果：staging_id 定位 MinIO 暂存对象，确认入库时原样回传 */
+export interface StagedFile { staging_id: string; name: string; size: number }
+/** 本地文件暂存上传：仅落 MinIO 暂存区，不建文档记录、不触发解析 */
+export const stageLibraryDocument = (id: number, file: File) => {
   const data = new FormData(); data.append('file', file)
-  return request.post<unknown, LibraryDocument>(`${root}/${id}/documents`, data, {timeout: 180000})
+  return request.post<unknown, StagedFile>(`${root}/${id}/staging`, data, {timeout: 180000})
 }
+/** 丢弃暂存文件：取消/关闭弹窗时从 MinIO 清理（幂等） */
+export const discardStagedDocuments = (id: number, stagingIds: string[]) =>
+  request.post<unknown, {ok: boolean; discarded: number}>(`${root}/${id}/staging/discard`, {staging_ids: stagingIds})
+/** 确认暂存文件入库：暂存对象迁入正式路径并自动解析（点「确定」才进知识列表） */
+export const commitStagedDocuments = (id: number, items: StagedFile[]) =>
+  request.post<unknown, {documents: LibraryDocument[]; errors: string[]}>(`${root}/${id}/documents/commit`, {items}, {timeout: 300000})
 export const libraryDocumentAction = (id: number, doc: string, action: 'parse' | 'stop' | 'refresh') =>
   request.post<unknown, LibraryDocument>(`${root}/${id}/documents/${doc}/${action}`, {}, {timeout: 180000})
 export const setDocumentEnabled = (id: number, doc: string, enabled: boolean) =>
@@ -66,3 +89,9 @@ export const listEmbeddingModels = () => request.get<unknown, {id: string; name:
 export const exportDocumentLibrary = (id: number) => request.get<unknown, Blob>(`/document-libraries/${id}/export`, {responseType: 'blob', timeout: 600000})
 
 export const deleteDocumentLibrary = (id: number) => request.delete(`/document-libraries/${id}`)
+
+/** 从钉钉导入文档到文档库：指定节点列表或整库（递归）。整库遍历+下载耗时，放宽超时。 */
+export interface DingTalkImportResult { imported: number; failed: number; errors: string[]; documents: LibraryDocument[] }
+export const importDingTalk = (id: number, payload: {
+  node_ids?: string[]; workspace_id?: string; root_node_id?: string; import_mode?: 'once' | 'sync'
+}) => request.post<unknown, DingTalkImportResult>(`${root}/${id}/import-dingtalk`, payload, { timeout: 10 * 60 * 1000 })

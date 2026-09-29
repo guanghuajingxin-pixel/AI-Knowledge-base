@@ -9,6 +9,8 @@ export interface RetrievalSettings {
   score_threshold: number
   rerank: boolean
   rerank_model_id: string
+  /** 混合检索未开 Rerank 时的语义权重（关键词权重 = 1 - 该值） */
+  vector_weight: number
 }
 
 const props = defineProps<{
@@ -42,6 +44,8 @@ const strategies = [
   { value: 'fulltext', label: '全文检索', desc: '索引文档中的所有词汇，并返回包含这些词汇的文本片段。推荐在需要对关键词精确匹配的场景下使用', icon: Search },
 ] as const
 
+const keywordWeight = computed(() => +(1 - draft.value.vector_weight).toFixed(2))
+
 function cancel() { visible.value = false }
 function save() {
   emit('save', { ...draft.value })
@@ -66,7 +70,7 @@ function save() {
             <div class="rsd-strategy-label">{{ s.label }}</div>
             <div class="rsd-strategy-desc">{{ s.desc }}</div>
           </div>
-          <el-radio :model-value="draft.mode" :label="s.value" @change="draft.mode = s.value" class="rsd-strategy-radio" />
+          <el-radio :model-value="draft.mode" :value="s.value" :aria-label="s.label" @change="draft.mode = s.value" class="rsd-strategy-radio" />
         </div>
       </div>
 
@@ -97,6 +101,23 @@ function save() {
               :value="p.id"
             />
           </el-select>
+        </div>
+
+        <!-- 权重设置（混合检索未开 Rerank 时生效） -->
+        <div v-if="draft.mode === 'hybrid' && !draft.rerank" class="rsd-config-row">
+          <div class="rsd-config-label"><span>权重设置</span></div>
+          <div class="rsd-weight-group">
+            <span class="rsd-weight-label">语义 {{ draft.vector_weight.toFixed(2) }}</span>
+            <el-slider
+              v-model="draft.vector_weight"
+              class="rsd-threshold-slider"
+              :min="0"
+              :max="1"
+              :step="0.05"
+              :show-tooltip="false"
+            />
+            <span class="rsd-weight-label">关键词 {{ keywordWeight.toFixed(2) }}</span>
+          </div>
         </div>
 
         <!-- Top K -->
@@ -217,4 +238,12 @@ function save() {
   gap: 12px;
 }
 .rsd-threshold-slider { flex: 1; }
+.rsd-weight-group {
+  flex: 1;
+  max-width: 360px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rsd-weight-label { flex: none; font-size: 12px; color: var(--el-text-color-secondary); }
 </style>

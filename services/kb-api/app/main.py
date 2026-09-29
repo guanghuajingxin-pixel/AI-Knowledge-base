@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route, sensitive, masking, structured_route, mineru_route, managed_library
+from app.routes import auth, users, internal, knowledge_base, directory, document, search, settings_route, knowledge_center, knowledge_library, dify_route, ragflow_route, operate, governance, agent_route, agent_internal, chat_session_route, qa_route, sync_route, process_route, knowledge_gaps, metrics_route, sensitive, masking, mineru_route, managed_library
 
 
 @asynccontextmanager
@@ -173,6 +173,9 @@ app.include_router(knowledge_center.router)
 app.include_router(knowledge_library.router)
 app.include_router(managed_library.router)
 app.include_router(managed_library.image_router)
+from app.routes import material_library
+app.include_router(material_library.router)
+app.include_router(material_library.components_router)
 app.include_router(sensitive.router)
 app.include_router(masking.router)
 app.include_router(dify_route.router)
@@ -185,7 +188,6 @@ app.include_router(agent_internal.router)
 app.include_router(chat_session_route.router)
 app.include_router(qa_route.router)
 app.include_router(sync_route.router)
-app.include_router(structured_route.router)
 app.include_router(process_route.router)
 app.include_router(metrics_route.router)
 app.include_router(mineru_route.router)

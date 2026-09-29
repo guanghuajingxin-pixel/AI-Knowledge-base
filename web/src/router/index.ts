@@ -64,14 +64,14 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'Dify智能问答', icon: 'ChatDotSquare', group: 'feature' },
       },
       {
-        // 知识采集：页面已拆分为二级页（钉钉知识同步/本地上传），父级仅作分组，重定向到首个子页
+        // 知识采集：页面已拆分为二级页（钉钉知识同步/同步队列），父级仅作分组，重定向到首个子页
         path: 'collection',
         name: 'Collection',
         redirect: '/knowledge-sources',
         meta: { title: '知识采集', icon: 'Download', group: 'feature' },
       },
       {
-        // 知识加工：二级页（解析引擎/结构化处理），父级仅作分组，重定向到首个子页
+        // 知识加工：仅解析引擎一个二级页，父级仅作分组，重定向到子页
         // （入库审核已迁入知识治理分组，见 /govern/review）
         path: 'process',
         name: 'Process',
@@ -84,13 +84,6 @@ const routes: RouteRecordRaw[] = [
         name: 'ProcessEngine',
         component: () => import('@/views/governance/ProcessEngine.vue'),
         meta: { title: '解析引擎', icon: 'Odometer', group: 'feature', parent: '/process', menuOrder: 1 },
-      },
-      {
-        // 结构化处理：解析 JSON → 表结构/字段映射 → 预览 → 一键写入共享 PG(structured schema)
-        path: 'process/structured',
-        name: 'ProcessStructured',
-        component: () => import('@/views/governance/StructuredProcess.vue'),
-        meta: { title: '结构化处理', icon: 'Grid', group: 'feature', parent: '/process', menuOrder: 2 },
       },
       {
         // 知识应用：拆分为二级页（脱敏策略/知识库），父级仅作分组，重定向到首个子页
@@ -203,13 +196,6 @@ const routes: RouteRecordRaw[] = [
         name: 'CollectionDingtalk',
         component: () => import('@/views/governance/collection/DingtalkSync.vue'),
         meta: { title: '钉钉知识同步', icon: 'Clock', group: 'feature', parent: '/collection', menuOrder: 2 },
-      },
-      {
-        // 本地上传：原「知识采集」页上传页签下沉为二级页（本地文档手动上传到 Dify）
-        path: 'collection/upload',
-        name: 'CollectionUpload',
-        component: () => import('@/views/governance/collection/ManualUpload.vue'),
-        meta: { title: '本地上传', icon: 'Upload', group: 'feature', parent: '/collection', menuOrder: 3 },
       },
       {
         // 同步队列：知识同步过程的逐文档任务列表（待处理/处理中/已完成 + 失败任务重试）

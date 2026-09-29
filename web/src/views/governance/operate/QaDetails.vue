@@ -144,21 +144,16 @@
     </div>
 
     <!-- 分页 -->
-    <div v-if="total > 0" class="pager">
-      <span class="pager-total">共 {{ total }} 条</span>
-      <el-select v-model="pageSize" size="small" style="width: 100px" @change="onSearch">
-        <el-option :value="20" label="20条/页" />
-        <el-option :value="50" label="50条/页" />
-      </el-select>
-      <el-pagination
-        background
-        layout="prev, pager, next"
-        :total="total"
-        :page-size="pageSize"
-        :current-page="page"
-        @current-change="onPageChange"
-      />
-    </div>
+    <KgPagination
+      v-if="total > 0"
+      :page="page"
+      :size="pageSize"
+      :total="total"
+      :sizes="[20, 50]"
+      layout="total, sizes, prev, pager, next"
+      @update:page="onPageChange"
+      @update:size="onPageSizeChange"
+    />
   </div>
 </template>
 
@@ -166,6 +161,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { Document, View, ArrowDown } from '@element-plus/icons-vue'
 import { getQaDetails, type QaDetailItem } from '@/api/qa'
+import KgPagination from '@/components/common/KgPagination.vue'
 
 const loading = ref(false)
 const items = ref<QaDetailItem[]>([])
@@ -251,6 +247,11 @@ function onReset() {
 }
 function onPageChange(p: number) {
   page.value = p
+  load()
+}
+function onPageSizeChange(s: number) {
+  pageSize.value = s
+  page.value = 1
   load()
 }
 
@@ -363,11 +364,4 @@ a.hit-link:hover { color: #2563EB; text-decoration: underline; }
   display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
 }
 .hit-foot { margin-top: 8px; display: flex; gap: 18px; font-size: 12px; color: #9CA3AF; }
-
-.pager {
-  display: flex; align-items: center; justify-content: flex-end; gap: 14px;
-  margin-top: 14px;
-  flex-shrink: 0;
-}
-.pager-total { font-size: 13.5px; color: #6B7280; }
 </style>

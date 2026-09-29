@@ -1,4 +1,6 @@
 import unittest
+import sys
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import httpx
@@ -117,11 +119,10 @@ class EngineContractTests(unittest.IsolatedAsyncioTestCase):
                 await routes.bound_document(session, 1, 'doc')
             self.assertEqual(raised.exception.status_code, 404)
 
-    async def test_engine_unconfigured_is_503(self):
+    async def test_engine_unconfigured_falls_back_to_cloud(self):
+        """STRUCTURED_KIT_BASE_URL 留空 → 云端 SaaS 引擎（Key 运行期取 settings/env，构造期不再 503）。"""
         with patch.object(routes, 'get_settings', return_value=SimpleNamespace(structured_kit_base_url='')):
-            with self.assertRaises(HTTPException) as raised:
-                routes.engine()
-            self.assertEqual(raised.exception.status_code, 503)
+            self.assertIsInstance(routes.engine(), routes.MinerUCloudEngine)
 
     async def test_legacy_parsing_doc_marked_failed_on_refresh(self):
         lib = SimpleNamespace(engine_config={'processing': {}})
@@ -189,7 +190,106 @@ class MinerULocalTests(unittest.TestCase):
         pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
                                        'delimiter': '。', 'enable_children': True, 'children_delimiter': '\n'})
         self.assertEqual(len(pieces), 1)
+        # Dify split_text 语义：fixed_separator（子分隔符 \n）切出的块 ≤ 限长原样保留
         self.assertEqual(pieces[0]['children'], ['第一行内容', '第二行内容', '第三行内容'])
+
+    def test_children_always_generated(self):
+        """Dify parent-child 语义：子块总是生成（≥1），短父块的唯一子块即父块整体（检索单元）。"""
+        text = '只有一行的短文档'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '。', 'enable_children': True, 'children_delimiter': '\n'})
+        self.assertEqual(len(pieces), 1)
+        self.assertEqual(pieces[0]['children'], [text])
+
+    def test_children_capped_by_token_num(self):
+        """子块限长（Dify fixed + 递归）：子分隔符切出的短块原样保留，
+        超长块按句界递归细分并滚动合并到限长。"""
+        long_line = '。'.join(f'第{i}句内容' for i in range(12)) + '。'
+        text = f'短行一\n{long_line}\n短行二'
+        base = {'chunk_method': 'naive', 'chunk_token_num': 500, 'delimiter': '\n',
+                'enable_children': True, 'children_delimiter': '\n'}
+        uncapped = chunk_markdown(text, {**base, 'children_chunk_token_num': 500})
+        # 父块 fixed='\n' 行级：三行各自成父块（≤ 500 原样保留，不合并）
+        self.assertEqual([p['content'] for p in uncapped], ['短行一', long_line, '短行二'])
+        self.assertEqual(uncapped[0]['children'], ['短行一'])  # 短行的唯一子块即父块整体
+        capped = chunk_markdown(text, {**base, 'children_chunk_token_num': 20})
+        long_children = capped[1]['children']
+        self.assertGreater(len(long_children), 1)  # 超长行递归细分 + 句子滚动合并
+        for child in long_children:
+            self.assertLessEqual(est_tokens(child), 20 + 8)  # 单句不硬拆容忍度
+        # 滚动合并：相邻短句聚合到限长（分隔符在单元间回接）而非逐句成块
+        self.assertEqual(long_children[0], '第0句内容。第1句内容。第2句内容')
+
+    def test_parent_mode_fulltext(self):
+        """全文父块：整篇作为单个父块，子块对全文按子分隔符切分（独立于父块长度）。"""
+        text = '。'.join(f'第{i}句内容较长一些用来撑出多个分段' for i in range(30)) + '。'
+        base = {'chunk_method': 'naive', 'chunk_token_num': 50, 'delimiter': '。',
+                'enable_children': True, 'children_delimiter': '\n', 'children_chunk_token_num': 200}
+        paragraph = chunk_markdown(text, {**base, 'parent_mode': 'paragraph'})
+        self.assertGreater(len(paragraph), 1)  # 段落模式：父块按分隔符优先级切分合并至限长
+        fulltext = chunk_markdown(text, {**base, 'parent_mode': 'fulltext'})
+        self.assertEqual(len(fulltext), 1)  # 全文模式：单父块
+        self.assertEqual(fulltext[0]['content'], text)  # 父块为整篇（未超 10000 Token 不截断）
+        children = fulltext[0]['children']
+        self.assertGreater(len(children), 1)  # 子块按子分隔符对全文切分合并至 200
+        for child in children:
+            self.assertLessEqual(est_tokens(child), 200 + 20)
+
+    def test_parent_mode_fulltext_truncates(self):
+        """全文父块超长保护：超过 10000 Token 截断并补省略提示。"""
+        text = '长' * 20000
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '。', 'enable_children': True,
+                                       'children_delimiter': '\n', 'parent_mode': 'fulltext'})
+        self.assertEqual(len(pieces), 1)
+        self.assertIn('已截断', pieces[0]['content'])
+        self.assertLess(est_tokens(pieces[0]['content']), 10000 + 100)
+
+    def test_parent_fixed_separator_semantics(self):
+        """父块 fixed 层（Dify split_text）：分段标识符切出的短段原样保留不合并，句读完整。"""
+        text = '。'.join(f'短句{i}' for i in range(10)) + '。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 12,
+                                       'delimiter': '。', 'enable_children': True,
+                                       'children_delimiter': '\n', 'children_chunk_token_num': 500})
+        parents = [p['content'] for p in pieces]
+        # 每句一个父块（≤ 限长原样保留，不滚动合并；本地化：句号保留在句尾）
+        self.assertEqual(parents, [f'短句{i}。' for i in range(10)])
+
+    def test_parent_fixed_paragraph_level(self):
+        """父块段落级（'\n\n'）：选 2个换行时整段作为父块，段内不再按行拆。"""
+        text = '第一段第一行\n第一段第二行\n\n第二段第一行\n\n第三段'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '\n\n', 'enable_children': True,
+                                       'children_delimiter': '\n', 'children_chunk_token_num': 500})
+        parents = [p['content'] for p in pieces]
+        self.assertEqual(parents, ['第一段第一行\n第一段第二行', '第二段第一行', '第三段'])
+        # 段内子块按行切分
+        self.assertEqual(pieces[0]['children'], ['第一段第一行', '第一段第二行'])
+
+    def test_parent_recursive_splits_overlong_segment(self):
+        """父块超长段递归：标识符切不动的超长段按 Dify 兜底分隔符递归（字符滑窗兜底）。"""
+        text = '很长的没有分隔符的连续文本' * 10  # 无任何用户标识符命中
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 30,
+                                       'delimiter': '。', 'enable_children': True,
+                                       'children_delimiter': '\n', 'children_chunk_token_num': 500})
+        parents = [p['content'] for p in pieces]
+        self.assertGreater(len(parents), 1)
+        for parent in parents:
+            self.assertLessEqual(est_tokens(parent), 30)  # 滑窗块不超限长
+
+    def test_dify_table_placeholder_atomic(self):
+        """表格占位原子：父子分段下表格整体落在一个子块内，绝不被切断。"""
+        table = '\n'.join(['| 列A | 列B |', '| --- | --- |'] + [f'| 值{i} | 数据{i} |' for i in range(30)])
+        text = f'表格前的说明文字。\n\n{table}\n\n表格后的结论文字。'
+        pieces = chunk_markdown(text, {'chunk_method': 'naive', 'chunk_token_num': 500,
+                                       'delimiter': '。', 'enable_children': True,
+                                       'children_delimiter': '\n', 'children_chunk_token_num': 10})
+        all_children = [c for p in pieces for c in (p['children'] or [])]
+        table_children = [c for c in all_children if '列A' in c or '值2' in c]
+        self.assertTrue(table_children)
+        for child in table_children:
+            self.assertIn('| --- | --- |', child)  # 表头分隔行完整
+            self.assertIn('| 值29 | 数据29 |', child)  # 尾行完整：整表在同一个子块
 
     def test_preprocess_replace_whitespace(self):
         md = '第一段。  \n\n\n\n第二段。\t\t第三段。'
@@ -508,5 +608,206 @@ class ProcessingMergeTests(unittest.TestCase):
     def test_zero_overlap_overrides(self):
         merged = self.merge({'overlap': 25}, {'overlap': 0})
         self.assertEqual(merged['overlap'], 0)  # 0 是有效配置（不重叠），不能被过滤
+
+
+class FileTypeRoutingTests(unittest.TestCase):
+    """「按文件类型」策略路由：库级 by_file_type 时按文档扩展名命中 type_rules
+    （扩展名大小写不敏感），未命中/auto 规则回落自动；文档级单独设置策略时不路由。"""
+
+    def route(self, doc_name, lib_cfg, doc_cfg=None):
+        lib = SimpleNamespace(engine_config=lib_cfg)
+        doc = SimpleNamespace(name=doc_name, engine_config=doc_cfg or {})
+        return routes._processing_for(lib, doc)
+
+    def test_rule_hit_custom_overrides(self):
+        lib_cfg = {'processing': {'chunk_method': 'naive', 'chunk_token_num': 512,
+                                  'delimiter': '\n。！？；', 'overlap': 25},
+                   'strategy': 'by_file_type',
+                   'type_rules': {'pdf': {'strategy': 'custom', 'method': 'paper',
+                                          'chunk_token_num': 300, 'delimiter': '。'}}}
+        merged = self.route('报告.PDF', lib_cfg)  # 扩展名大写也命中
+        self.assertEqual(merged['chunk_method'], 'paper')
+        self.assertEqual(merged['chunk_token_num'], 300)
+        self.assertEqual(merged['delimiter'], '。')
+        self.assertFalse(merged['enable_children'])
+        self.assertEqual(merged['overlap'], 25)  # 未覆盖键继承库级
+
+    def test_rule_hit_parent_child(self):
+        lib_cfg = {'processing': {'chunk_method': 'auto', 'enable_children': False},
+                   'strategy': 'by_file_type',
+                   'type_rules': {'docx': {'strategy': 'parent_child', 'method': 'naive',
+                                           'chunk_token_num': 400, 'delimiter': '。',
+                                           'children_delimiter': '\n\n'}}}
+        merged = self.route('手册.docx', lib_cfg)
+        self.assertEqual(merged['chunk_method'], 'naive')
+        self.assertTrue(merged['enable_children'])
+        self.assertEqual(merged['chunk_token_num'], 400)
+        self.assertEqual(merged['children_delimiter'], '\n\n')
+
+    def test_rule_miss_falls_back_to_auto(self):
+        lib_cfg = {'processing': {'chunk_method': 'naive', 'chunk_token_num': 300},
+                   'strategy': 'by_file_type',
+                   'type_rules': {'pdf': {'strategy': 'custom', 'method': 'paper'}}}
+        merged = self.route('笔记.txt', lib_cfg)  # 未命中规则 → 自动
+        self.assertEqual(merged['chunk_method'], 'auto')
+        self.assertEqual(merged['chunk_token_num'], 512)
+        self.assertEqual(merged['delimiter'], '\n。！？；')
+        self.assertEqual(merged['overlap'], 25)
+
+    def test_auto_rule_falls_back_to_auto(self):
+        lib_cfg = {'processing': {'chunk_method': 'naive', 'chunk_token_num': 300},
+                   'strategy': 'by_file_type',
+                   'type_rules': {'pdf': {'strategy': 'auto'}}}
+        merged = self.route('报告.pdf', lib_cfg)
+        self.assertEqual(merged['chunk_method'], 'auto')
+
+    def test_doc_level_strategy_skips_routing(self):
+        lib_cfg = {'processing': {'chunk_method': 'naive', 'chunk_token_num': 512},
+                   'strategy': 'by_file_type',
+                   'type_rules': {'pdf': {'strategy': 'custom', 'method': 'paper', 'chunk_token_num': 300}}}
+        doc_cfg = {'processing': {'chunk_method': 'manual'}, 'strategy': 'custom'}
+        merged = self.route('报告.pdf', lib_cfg, doc_cfg)
+        self.assertEqual(merged['chunk_method'], 'manual')  # 文档级设置优先，不按文件类型路由
+        self.assertEqual(merged['chunk_token_num'], 512)
+
+    def test_non_by_file_type_library_never_routes(self):
+        lib_cfg = {'processing': {'chunk_method': 'naive'}, 'strategy': 'custom',
+                   'type_rules': {'pdf': {'strategy': 'custom', 'method': 'paper'}}}
+        merged = self.route('报告.pdf', lib_cfg)
+        self.assertEqual(merged['chunk_method'], 'naive')
+
+
+class RetrievalConfigTests(unittest.TestCase):
+    """库级检索设置：LibraryIn.retrieval → engine_config.retrieval → _library_config 输出。"""
+
+    def test_engine_config_roundtrip(self):
+        body = routes.LibraryIn(name='测试库', strategy='auto',
+                                retrieval=routes.RetrievalConfig(mode='fulltext', rerank=True,
+                                                                  rerank_model_id='rid-1', top_k=20,
+                                                                  score_threshold=0.3, vector_weight=0.4))
+        cfg = routes._library_engine_config(body)
+        self.assertEqual(cfg['retrieval']['mode'], 'fulltext')
+        self.assertEqual(cfg['retrieval']['top_k'], 20)
+        self.assertNotIn('retrieval', cfg['processing'])  # 检索设置不混入解析参数
+        out = routes._library_config(SimpleNamespace(engine_config=cfg))
+        self.assertEqual(out['retrieval']['rerank'], True)
+        self.assertEqual(out['retrieval']['rerank_model_id'], 'rid-1')
+        self.assertEqual(out['retrieval']['vector_weight'], 0.4)
+
+    def test_retrieval_optional_defaults_empty(self):
+        body = routes.LibraryIn(name='测试库')
+        cfg = routes._library_engine_config(body)
+        self.assertEqual(cfg['retrieval'], {})  # 未传检索设置存空对象
+        out = routes._library_config(SimpleNamespace(engine_config={'processing': {}}))
+        self.assertEqual(out['retrieval'], {})  # 旧库输出空对象（前端回落默认）
+
+
+class StagingFlowTests(unittest.IsolatedAsyncioTestCase):
+    """本地文件两段式上传：staging 仅暂存（不建文档/不解析）→ commit 入库并解析 → discard 清理 MinIO。"""
+
+    def fake_minio(self, **overrides):
+        fake = SimpleNamespace(RAW='raw-docs', PARSED='parsed-docs',
+                               upload_bytes=Mock(side_effect=lambda b, k, d: k),
+                               copy_object=Mock(), delete_prefix=Mock(return_value=1))
+        for key, value in overrides.items():
+            setattr(fake, key, value)
+        return fake
+
+    def staging_mocks(self, fake):
+        """函数内延迟导入的 minio_client 用 sys.modules + 包属性双保险替换，避免真实连接。"""
+        import kb_common.clients as clients_pkg
+        return (patch.dict(sys.modules, {'kb_common.clients.minio_client': fake}),
+                patch.object(clients_pkg, 'minio_client', fake, create=True),
+                patch.object(routes, 'library', AsyncMock(return_value=object())))
+
+    def test_validated_upload_name(self):
+        self.assertEqual(routes._validated_upload_name('dir/../报告.pdf'), '报告.pdf')
+        self.assertEqual(routes._validated_upload_name('C:\\a\\b.docx'), 'b.docx')
+        for bad in ('a.exe', '', None, 'x' * 501 + '.pdf'):
+            with self.assertRaises(HTTPException):
+                routes._validated_upload_name(bad)
+
+    async def test_stage_upload_only_stores_to_staging_prefix(self):
+        """暂存上传：仅落 MinIO 暂存区并返回定位信息，不触发解析。"""
+        fake = self.fake_minio()
+        file = SimpleNamespace(filename='../报告.pdf', read=AsyncMock(return_value=b'pdf-bytes'))
+        m1, m2, m3 = self.staging_mocks(fake)
+        with m1, m2, m3, patch.object(routes, '_do_parse', AsyncMock()) as do_parse:
+            result = await routes.stage_upload(7, file, None)
+        key = fake.upload_bytes.call_args[0][1]
+        self.assertTrue(key.startswith('document-libraries/7/staging/'))
+        self.assertIn('/报告.pdf', key)
+        self.assertEqual(result['name'], '报告.pdf')
+        self.assertEqual(result['size'], len(b'pdf-bytes'))
+        self.assertTrue(result['staging_id'])
+        do_parse.assert_not_awaited()
+
+    async def test_stage_upload_rejects_unsupported_type(self):
+        fake = self.fake_minio()
+        file = SimpleNamespace(filename='a.exe', read=AsyncMock(return_value=b'x'))
+        m1, m2, m3 = self.staging_mocks(fake)
+        with m1, m2, m3:
+            with self.assertRaises(HTTPException) as raised:
+                await routes.stage_upload(7, file, None)
+            self.assertEqual(raised.exception.status_code, 422)
+        fake.upload_bytes.assert_not_called()
+
+    async def test_staging_discard_removes_prefixes(self):
+        """丢弃：按 staging_id 前缀删除暂存对象（幂等）。"""
+        fake = self.fake_minio()
+        sid = uuid.uuid4()
+        m1, m2, m3 = self.staging_mocks(fake)
+        with m1, m2, m3:
+            result = await routes.staging_discard(7, routes.StagingDiscardIn(staging_ids=[sid]), None)
+        fake.delete_prefix.assert_called_once_with('raw-docs', f'document-libraries/7/staging/{sid}/')
+        self.assertEqual(result, {'ok': True, 'discarded': 1})
+
+    async def test_staging_commit_migrates_creates_doc_and_parses(self):
+        """确认入库：暂存对象迁到正式路径 → 建文档（UPLOADED）→ 自动解析。"""
+        fake = self.fake_minio()
+        session = SimpleNamespace(add=Mock(), commit=AsyncMock(), refresh=AsyncMock())
+        sid = uuid.uuid4()
+        body = routes.StagingCommitIn(items=[{'staging_id': str(sid), 'name': '报告.pdf', 'size': 9}])
+        m1, m2, m3 = self.staging_mocks(fake)
+        with m1, m2, m3, patch.object(routes, '_do_parse', AsyncMock()) as do_parse:
+            result = await routes.staging_commit(7, body, session)
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(len(result['documents']), 1)
+        doc = session.add.call_args[0][0]
+        self.assertEqual((doc.library_id, doc.name, doc.status), (7, '报告.pdf', 'UPLOADED'))
+        self.assertEqual(doc.storage_path, f'document-libraries/7/{doc.id}/报告.pdf')
+        args = fake.copy_object.call_args[0]
+        self.assertEqual(args[1], f'document-libraries/7/staging/{sid}/报告.pdf')
+        self.assertEqual(args[3], doc.storage_path)
+        fake.delete_prefix.assert_called_with('raw-docs', f'document-libraries/7/staging/{sid}/')
+        do_parse.assert_awaited_once_with(session, 7, doc.id)
+
+    async def test_staging_commit_collects_errors_and_cleans_staging(self):
+        """迁移失败：不建文档、记入 errors 并清理该项目的暂存对象。"""
+        fake = self.fake_minio(copy_object=Mock(side_effect=RuntimeError('boom')))
+        session = SimpleNamespace(add=Mock(), commit=AsyncMock(), refresh=AsyncMock())
+        sid = uuid.uuid4()
+        body = routes.StagingCommitIn(items=[{'staging_id': str(sid), 'name': 'a.pdf', 'size': 1}])
+        m1, m2, m3 = self.staging_mocks(fake)
+        with m1, m2, m3:
+            result = await routes.staging_commit(7, body, session)
+        self.assertEqual(result['documents'], [])
+        self.assertEqual(len(result['errors']), 1)
+        session.add.assert_not_called()
+        fake.delete_prefix.assert_called_with('raw-docs', f'document-libraries/7/staging/{sid}/')
+
+    async def test_staging_commit_parse_failure_marks_doc_failed(self):
+        """解析失败沿用单文件上传语义：文档保留并置 FAILED，可手动重新解析。"""
+        fake = self.fake_minio()
+        session = SimpleNamespace(add=Mock(), commit=AsyncMock(), refresh=AsyncMock())
+        sid = uuid.uuid4()
+        body = routes.StagingCommitIn(items=[{'staging_id': str(sid), 'name': 'a.pdf', 'size': 1}])
+        m1, m2, m3 = self.staging_mocks(fake)
+        with m1, m2, m3, patch.object(routes, '_do_parse', AsyncMock(side_effect=RuntimeError('engine down'))):
+            result = await routes.staging_commit(7, body, session)
+        self.assertEqual(len(result['documents']), 1)
+        doc = session.add.call_args[0][0]
+        self.assertEqual(doc.status, 'FAILED')
+
 
 if __name__ == '__main__': unittest.main()

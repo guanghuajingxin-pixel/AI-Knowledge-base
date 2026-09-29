@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageContainer from '@/components/common/PageContainer.vue'
+import ImageComponentsPanel from '@/components/library/ImageComponentsPanel.vue'
 import {
   getSettings, setSetting, testLLM, listLlmModels, testDify, testMineru, testDingtalk,
   testEmbedding, testRerank,
@@ -872,7 +873,7 @@ async function loadMenuConfig() {
         visible: !hidden.includes(r.path),
       }))
     // 保持路由定义顺序
-    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/upload', '/process', '/process/engine', '/apply', '/operate', '/operate/dashboard', '/operate/qa', '/operate/corrections', '/govern', '/govern/gaps', '/govern/review']
+    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/queue', '/process', '/process/engine', '/apply', '/operate', '/operate/dashboard', '/operate/qa', '/operate/corrections', '/govern', '/govern/gaps', '/govern/review']
     items.sort((a, b) => {
       const ia = orderedPaths.indexOf(a.path)
       const ib = orderedPaths.indexOf(b.path)
@@ -911,6 +912,7 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
     <p class="pg-sub">智能体的大脑与全链路 AI 节点的模型管理：问答模型可选可换，判定类节点（分诊/质检/命名校验/打标）绑定低温度模型并开启结构化输出。</p>
 
     <el-tabs v-model="activeTab">
+      <el-tab-pane label="图片组件" name="image-components" lazy><ImageComponentsPanel /></el-tab-pane>
       <!-- ============ 接入配置（真实表单） ============ -->
       <el-tab-pane label="接入配置" name="access">
         <el-form label-width="140px">

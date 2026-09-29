@@ -55,6 +55,26 @@ export const useTabsStore = defineStore('tabs', () => {
     if (tab) tab.title = title
   }
 
+  // 序号页签标题：固定 base 文案，同类页签多开时自动编号 -1/-2…（取最小可用编号；
+  // 刷新恢复会话时已分配且不冲突的编号保持不变）。base 须为不含正则特殊字符的字面量。
+  function assignSequentialTitle(path: string, base: string) {
+    const slotOf = (t: string): number | null => {
+      const m = new RegExp(`^${base}(-\\d+)?$`).exec(t)
+      return m ? (m[1] ? Number(m[1]) : 0) : null
+    }
+    const cur = tabs.value.find((t) => t.path === path)
+    const curSlot = cur ? slotOf(cur.title) : null
+    const usedSlots = tabs.value
+      .filter((t) => t.path !== path)
+      .map((t) => slotOf(t.title))
+      .filter((n): n is number => n !== null)
+    if (curSlot !== null && !usedSlots.includes(curSlot)) return
+    const used = new Set(usedSlots)
+    let n = 0
+    while (used.has(n)) n++
+    updateTabTitle(path, n === 0 ? base : `${base}-${n}`)
+  }
+
   function removeTab(path: string) {
     const tab = tabs.value.find((t) => t.path === path)
     if (!tab) return
@@ -100,5 +120,5 @@ export const useTabsStore = defineStore('tabs', () => {
     { immediate: true },
   )
 
-  return { tabs, addTab, updateTabTitle, removeTab, closeOthers, closeAll }
+  return { tabs, addTab, updateTabTitle, assignSequentialTitle, removeTab, closeOthers, closeAll }
 })

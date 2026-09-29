@@ -38,7 +38,7 @@ function formatSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
-// Dify 知识库列表持久缓存 1 小时（与 ManualUpload 共用一份）：
+// Dify 知识库列表持久缓存 1 小时：
 // 命中秒开下拉并后台校准，切「文档同步」页签不再等 Dify API
 const DS_STORE_KEY = 'kge:dify_datasets_v1'
 const DS_STORE_TTL = 3_600_000

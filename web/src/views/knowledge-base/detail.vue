@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import PageContainer from '@/components/common/PageContainer.vue'
 import DirectoryTree from '@/components/kb/DirectoryTree.vue'
-import UploadDialog from '@/components/document/UploadDialog.vue'
+import AddKnowledgeDialog from '@/components/kb/AddKnowledgeDialog.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
 import { getKnowledgeBase } from '@/api/knowledge-base'
 import { listDocuments, deleteDocument, getDocumentPreviewUrl, reprocessDocument } from '@/api/document'
@@ -24,7 +24,7 @@ const page = ref(1)
 const size = ref(10)
 const loading = ref(false)
 const selectedDirectory = ref<string | null>(null)
-const uploadVisible = ref(false)
+const addKnowledgeVisible = ref(false)
 
 async function fetchKb() {
   kb.value = await getKnowledgeBase(kbId)
@@ -89,7 +89,7 @@ onMounted(() => {
   <PageContainer :title="kb?.name || '知识库详情'">
     <template #actions>
       <el-button :icon="Refresh" @click="fetchDocuments">刷新</el-button>
-      <el-button type="primary" :icon="Plus" @click="uploadVisible = true">上传文档</el-button>
+      <el-button type="primary" :icon="Plus" @click="addKnowledgeVisible = true">添加知识</el-button>
     </template>
     <div class="detail-layout">
       <DirectoryTree :kb-id="kbId" @select="handleDirectorySelect" />
@@ -129,7 +129,7 @@ onMounted(() => {
       </div>
     </div>
   </PageContainer>
-  <UploadDialog v-model="uploadVisible" :kb-id="kbId" :directory-id="selectedDirectory" @success="fetchDocuments" />
+  <AddKnowledgeDialog v-model="addKnowledgeVisible" :kb-id="kbId" :directory-id="selectedDirectory" @success="fetchDocuments" />
 </template>
 
 <style scoped>

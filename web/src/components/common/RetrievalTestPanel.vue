@@ -6,6 +6,8 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { searchTest } from '@/api/search'
 import { testKnowledgeRetrieval, type RetrievalTestHit } from '@/api/knowledge-library'
+import { listDocumentLibraries } from '@/api/document-library'
+import { retrievalFromConfig } from '@/components/library/index-settings'
 import RetrievalSettingsDialog, { type RetrievalSettings } from './RetrievalSettingsDialog.vue'
 import { rewriteChunkImages } from '@/utils/chunk-images'
 
@@ -53,6 +55,7 @@ const settings = reactive<RetrievalSettings>({
   score_threshold: 0,
   rerank: true,
   rerank_model_id: '',
+  vector_weight: 0.7,
 })
 
 const settingsDialog = ref(false)
@@ -125,6 +128,7 @@ async function runSearch() {
         rerank: settings.rerank,
         rerank_model_id: settings.rerank_model_id || undefined,
         similarity_threshold: settings.score_threshold,
+        vector_similarity_weight: settings.mode === 'hybrid' ? settings.vector_weight : undefined,
         document_ids: props.scope === 'document' && props.documentId ? [props.documentId] : undefined,
       })
       libErrors.value = (res.libraries || []).filter(l => !l.ok).map(l => `${l.name}: ${l.error}`)
@@ -213,6 +217,17 @@ function formatTime(ts: number) {
 }
 
 onMounted(loadRecords)
+
+// 知识库抽象层检索：目标为文档库且已保存「检索设置」时，按库配置预填本次测试初值
+// （外部库 Dify/RAGFlow 无本地检索设置，保持全局默认；预填失败静默回退）
+onMounted(async () => {
+  if (backend.value !== 'library' || !props.libraryId) return
+  try {
+    const libs = await listDocumentLibraries()
+    const lib = libs.find(l => l.id === props.libraryId)
+    if (lib?.config?.retrieval) Object.assign(settings, retrievalFromConfig(lib.config.retrieval))
+  } catch { /* 预填失败保持默认 */ }
+})
 </script>
 
 <template>
@@ -229,7 +244,7 @@ onMounted(loadRecords)
         <!-- 左上：检索内容输入区 -->
         <section class="rtp-card rtp-input-area">
           <div class="rtp-mode-row">
-            <el-button text @click="settingsDialog = true">
+            <el-button class="rtp-mode-btn" @click="settingsDialog = true">
               {{ modeLabel }}
               <el-icon class="el-icon--right"><arrow-down /></el-icon>
             </el-button>
@@ -237,7 +252,7 @@ onMounted(loadRecords)
           <el-input
             v-model="query"
             type="textarea"
-            :rows="4"
+            :rows="8"
             :maxlength="MAX_QUERY"
             show-word-limit
             placeholder="输入检索内容，回车或点击检索"
@@ -280,7 +295,6 @@ onMounted(loadRecords)
         <section class="rtp-card rtp-settings-area">
           <div class="rtp-card-header">
             <span class="rtp-card-title">检索设置</span>
-            <el-tag size="small" type="warning" effect="plain">实际的测试配置项</el-tag>
           </div>
           <div class="rtp-settings-grid">
             <div class="rtp-setting-item">
@@ -428,7 +442,8 @@ onMounted(loadRecords)
 .rtp-took { font-size: 12px; color: var(--el-text-color-secondary); }
 
 /* 输入区 */
-.rtp-mode-row { display: flex; align-items: center; gap: 4px; }
+.rtp-mode-row { display: flex; align-items: center; margin-bottom: 8px; }
+.rtp-mode-btn { padding: 5px 12px; }
 .rtp-rerank { display: flex; align-items: center; }
 .rtp-input-actions { display: flex; justify-content: flex-end; }
 

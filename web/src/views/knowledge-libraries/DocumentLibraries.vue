@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox, type UploadFile } from 'element-plus'
-import { ArrowDown, Back, Clock, Document, Plus, QuestionFilled, Search, Upload } from '@element-plus/icons-vue'
-import { listDocumentLibraries, saveDocumentLibrary, listLibraryDocuments, uploadLibraryDocument,
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown, Back, Clock, Document, Plus, QuestionFilled, Search } from '@element-plus/icons-vue'
+import { listDocumentLibraries, saveDocumentLibrary, listLibraryDocuments,
   libraryDocumentAction, setDocumentEnabled, deleteLibraryDocument, setDocumentConfig,
   deleteDocumentLibrary, exportDocumentLibrary, listEmbeddingModels, downloadOriginal, setLibraryDocumentTags,
   type DocumentLibrary, type LibraryDocument } from '@/api/document-library'
 import IndexSettingsDialog from '@/components/library/IndexSettingsDialog.vue'
 import IndexSettingsPanel from '@/components/library/IndexSettingsPanel.vue'
-import { settingsFromConfig, settingsToConfig, librarySettingsFromConfig, defaultSettings, METHODS, type IndexSettings } from '@/components/library/index-settings'
+import RetrievalSettingsPanel from '@/components/library/RetrievalSettingsPanel.vue'
+import AddKnowledgeDialog from '@/components/kb/AddKnowledgeDialog.vue'
+import KgPagination from '@/components/common/KgPagination.vue'
+import { settingsFromConfig, settingsToConfig, librarySettingsFromConfig, defaultSettings,
+  defaultRetrievalSettings, retrievalFromConfig, METHODS, type IndexSettings, type RetrievalSettings } from '@/components/library/index-settings'
 import { updateKnowledgeLibrary } from '@/api/knowledge-library'
 import { useUserStore } from '@/stores/user'
 import { formatDateTime, formatFileSize, formatSource } from '@/utils/format'
@@ -25,8 +29,17 @@ const error = ref('')
 const keyword = ref('')
 const visibleLibraries = computed(() => libraries.value.filter(l => l.name.includes(keyword.value)))
 const visibleDocuments = computed(() => documents.value.filter(d => d.name.includes(keyword.value)))
+// 知识列表前端分页（接口一次返回全量，这里按页切片展示）
+const docPage = ref(1)
+const docSize = ref(20)
+const pagedDocuments = computed(() => {
+  const start = (docPage.value - 1) * docSize.value
+  return visibleDocuments.value.slice(start, start + docSize.value)
+})
+watch(() => keyword.value, () => { docPage.value = 1 })
 const dialog = ref(false)
 const step = ref(0)
+const addKnowledgeVisible = ref(false)
 
 // 标签编辑
 const tagDialog = ref(false)
@@ -80,6 +93,9 @@ const editingId = ref<number>()
 const form = reactive({name: '', description: '', embedding_model: ''})
 const libSettings = ref<IndexSettings>(defaultSettings())
 const libPanel = ref<InstanceType<typeof IndexSettingsPanel>>()
+// 库级检索设置由 RetrievalSettingsPanel 自持（libRetrieval 为回填初值）
+const libRetrieval = ref<RetrievalSettings>(defaultRetrievalSettings())
+const retrievalPanel = ref<InstanceType<typeof RetrievalSettingsPanel>>()
 // 知识库级解析开关：编辑保存后是否对库内全部文档重新解析（默认关闭，批量操作由用户决定）
 const reparseAll = ref(false)
 const statusLabels: Record<string, string> = {PARSING: '解析中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已停止', UNKNOWN: '状态未知'}
@@ -97,7 +113,7 @@ async function load() {
   } catch (e: any) { error.value = e.message || '加载失败' }
   finally { loading.value = false }
 }
-async function openLibrary(lib: DocumentLibrary) { selected.value = lib; keyword.value = ''; await load() }
+async function openLibrary(lib: DocumentLibrary) { selected.value = lib; keyword.value = ''; docPage.value = 1; await load() }
 const embeddingModels = ref<{id: string; name: string}[]>([])
 const modelError = ref('')
 async function openCreate(lib?: DocumentLibrary) {
@@ -106,6 +122,7 @@ async function openCreate(lib?: DocumentLibrary) {
     embedding_model: lib?.config?.processing?.embedding_model || ''})
   // 库级全量配置回填（旧库无 strategy 时由 processing 推导），新对象触发共用面板重新初始化
   libSettings.value = librarySettingsFromConfig(lib?.config || null)
+  libRetrieval.value = retrievalFromConfig(lib?.config?.retrieval)
   reparseAll.value = false
   dialog.value = true
   modelError.value = ''
@@ -121,6 +138,7 @@ async function save() {
       ...cfg.processing, embedding_model: form.embedding_model,
       name: form.name, description: form.description,
       strategy: cfg.strategy, enhancements: cfg.enhancements, type_rules: cfg.type_rules,
+      retrieval: retrievalPanel.value!.getSettings(),
     }, editingId.value)
     if (selected.value?.id === lib.id) selected.value = lib
     dialog.value = false
@@ -138,11 +156,6 @@ async function save() {
     }
     await load(); ElMessage.success(editingId.value ? '设置已保存，已有文档需重新解析才生效' : '知识库已创建')
   })
-}
-async function upload(file: UploadFile) {
-  if (!file.raw || !selected.value) return
-  const id = selected.value.id
-  await run(async () => { await uploadLibraryDocument(id, file.raw!); await load(); ElMessage.success('已上传，正在自动解析') })
 }
 async function action(doc: LibraryDocument, action: 'parse' | 'stop' | 'refresh') {
   if (!selected.value) return
@@ -276,9 +289,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           <el-button v-if="canPublish" :icon="Search" @click="goRetrievalTest">检索测试</el-button>
         </template>
         <el-button v-else class="toolbar-create" type="primary" :icon="Plus" @click="openCreate()">创建知识库</el-button>
-        <el-upload v-if="selected" :show-file-list="false" :auto-upload="false" :on-change="upload" :disabled="busy" accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.pptx,.html">
-          <el-button type="primary" :icon="Upload" :loading="busy">上传文档</el-button>
-        </el-upload>
+        <el-button v-if="selected" type="primary" :icon="Plus" :loading="busy" @click="addKnowledgeVisible = true">添加知识</el-button>
       </div>
       <template v-if="!selected">
         <el-table :data="visibleLibraries" empty-text="暂无文档库，点击创建知识库开始">
@@ -292,7 +303,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         </el-table>
       </template>
       <template v-else>
-        <el-table :data="visibleDocuments" empty-text="暂无文档，请上传文件">
+        <el-table :data="pagedDocuments" empty-text="暂无文档，请上传文件">
           <el-table-column label="文档名称" min-width="260" show-overflow-tooltip><template #default="{row}"><el-button link type="primary" :disabled="row.status === 'PARSING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></template></el-table-column>
           <el-table-column label="标签" min-width="220"><template #default="{row}">
             <div class="tag-cell">
@@ -325,11 +336,20 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
             </div>
           </template></el-table-column>
         </el-table>
+        <KgPagination
+          :page="docPage"
+          :size="docSize"
+          :total="visibleDocuments.length"
+          :sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          @update:page="(p: number) => docPage = p"
+          @update:size="(s: number) => { docSize = s; docPage = 1 }"
+        />
       </template>
     </div>
     <el-dialog v-model="dialog" class="library-config-dialog" top="5vh" :title="editingId ? '知识库设置' : '创建知识库'" width="min(680px, 94vw)" :close-on-click-modal="false">
-      <el-steps :active="step" simple><el-step title="基础信息" /><el-step title="解析与分段" /></el-steps>
-      <!-- v-show 保持两步均挂载：共用分段面板在步骤切换间不丢状态 -->
+      <el-steps :active="step" simple><el-step title="基础信息" /><el-step title="分段与检索" /></el-steps>
+      <!-- v-show 保持两步均挂载：共用分段/检索面板在步骤切换间不丢状态 -->
       <div v-show="step === 0">
         <el-form label-width="110px" class="config-form">
           <el-form-item label="知识库名称" required><el-input v-model="form.name" maxlength="200" show-word-limit placeholder="请输入知识库名称" /></el-form-item>
@@ -337,8 +357,9 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         </el-form>
       </div>
       <div v-show="step === 1" class="step-segment">
-        <el-alert title="设置作为文档解析的默认规则，不会自动覆盖已有分段；可通过下方开关决定保存后是否重新解析。" type="info" :closable="false" />
+        <el-alert title="分段设置作为文档解析的默认规则，不会自动覆盖已有分段；检索设置保存后立即生效。" type="info" :closable="false" />
         <IndexSettingsPanel ref="libPanel" scope="library" :value="libSettings" />
+        <RetrievalSettingsPanel ref="retrievalPanel" :value="libRetrieval" />
         <el-form label-width="110px" class="config-form">
           <el-form-item v-if="editingId" label="重新解析">
             <div class="switch-line">
@@ -426,6 +447,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         <el-button type="primary" :disabled="detailDoc?.status === 'PARSING'" @click="detailVisible = false; openSettings(detailDoc!)">编辑</el-button>
       </template>
     </el-drawer>
+    <AddKnowledgeDialog v-model="addKnowledgeVisible" :library-id="selected?.id" :library-name="selected?.name" @success="load" />
   </div>
 </template>
 <style scoped>
@@ -439,6 +461,7 @@ p, .hint { color: #909399; font-size: 13px; }
 .tip-icon { color: #c0c4cc; font-size: 14px; cursor: help; }
 .config-form { margin-top: 24px; }
 .step-segment :deep(.index-settings) { margin-top: 16px; }
+.step-segment :deep(.retrieval-settings) { margin-top: 16px; }
 .step-segment .config-form { margin-top: 16px; }
 :global(.library-config-dialog .el-dialog__body) { max-height: calc(85vh - 120px); overflow-y: auto; }
 .el-alert { margin-bottom: 16px; }

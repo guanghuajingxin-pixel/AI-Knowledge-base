@@ -39,6 +39,17 @@ celery_app.conf.update(task_track_started=True, task_acks_late=True,
 _loop: asyncio.AbstractEventLoop | None = None
 
 
+def _run_material_async(coro):
+    global _loop
+    if _loop is None or _loop.is_closed():
+        _loop = asyncio.new_event_loop()
+    return _loop.run_until_complete(coro)
+
+
+from app.services.material_jobs import install as _install_material_jobs
+process_material_image = _install_material_jobs(celery_app, _run_material_async)
+
+
 async def _setting(session, key, default=""):
     row = (await session.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
     return (row.value if row else None) or default or getattr(s, key)

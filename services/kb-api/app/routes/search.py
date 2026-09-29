@@ -208,7 +208,7 @@ async def _resolve_retrieval_targets(body: "ChatIn", user, session) -> tuple[lis
     ragflow_ids: list[str] = []
 
     if body.library_ids is not None:
-        rows = (await session.execute(select(KnowledgeLibrary))).scalars().all()
+        rows = (await session.execute(select(KnowledgeLibrary).where(KnowledgeLibrary.library_type != "material"))).scalars().all()
         by_id = {r.id: r for r in rows}
         if not is_admin:
             bad = [i for i in body.library_ids
@@ -252,6 +252,7 @@ async def _resolve_retrieval_targets(body: "ChatIn", user, session) -> tuple[lis
         # 缺省：知识库抽象层里全部启用的库
         rows = (await session.execute(select(KnowledgeLibrary).where(
             KnowledgeLibrary.enabled == True,  # noqa: E712
+            KnowledgeLibrary.library_type != "material",
         ))).scalars().all()
         for r in rows:
             (dify_ids if r.platform == "dify" else ragflow_ids).append(r.dataset_id)

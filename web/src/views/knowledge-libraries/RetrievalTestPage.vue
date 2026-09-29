@@ -19,8 +19,8 @@ onMounted(() => {
     const cached = sessionStorage.getItem(`doc_name:${docId.value}`)
     if (cached) docName.value = cached
   }
-  const title = scope.value === 'document' ? `检索测试${docName.value ? ` · ${docName.value}` : ''}` : '检索测试'
-  tabsStore.updateTabTitle(route.path, title)
+  // 页签标题固定「检索测试」，多开时自动编号 -1/-2…，不带文件名
+  tabsStore.assignSequentialTitle(route.path, '检索测试')
 })
 </script>
 

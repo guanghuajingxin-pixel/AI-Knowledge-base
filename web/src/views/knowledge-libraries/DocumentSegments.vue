@@ -4,8 +4,9 @@ import DOMPurify from 'dompurify'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Back, Search, Close, View, Top, Bottom, Edit, Delete } from '@element-plus/icons-vue'
+import { Back, Search, Close, View, Top, Bottom, Edit, Delete, QuestionFilled, ArrowDown } from '@element-plus/icons-vue'
 import { listDocumentLibraries, listLibraryDocuments, getLibraryChunks, saveLibraryChunk, deleteLibraryChunk, getLibraryDocumentPreviewUrl, type DocumentLibrary, type LibraryDocument, type LibraryChunk, type LibraryChunkInput } from '@/api/document-library'
+import { settingsFromConfig } from '@/components/library/index-settings'
 import { rewriteChunkImages } from '@/utils/chunk-images'
 import { useTabsStore } from '@/stores/tabs'
 import ParsedContentView from '@/components/common/ParsedContentView.vue'
@@ -107,6 +108,16 @@ const chunkDialogTitle = computed(() =>
     : insertRef.value?.where === 'after' ? '向后插入分段'
     : '新增分段')
 
+// 父子分段模式判定：全文父块（parent_mode=fulltext）时父分段内容与解析原文重复，
+// 卡片内不展示父内容、直接平铺子分段；段落模式保持「父内容 + 可展开子分区」
+const segSettings = computed(() => settingsFromConfig(doc.value?.config, lib.value?.config))
+const fulltextParent = computed(() =>
+  segSettings.value.strategy === 'parent_child' && segSettings.value.parent_mode === 'fulltext')
+
+// 子分段展示（父子分段-段落模式）：默认全部收起，点击展开/收起（父卡片独立状态）
+const expandedChildren = reactive<Record<string, boolean>>({})
+function toggleChildren(chunk: LibraryChunk) { expandedChildren[chunk.id] = !expandedChildren[chunk.id] }
+
 async function load() {
   loading.value = true
   try { const res = await getLibraryChunks(libId, docId, page.value, keyword.value); chunks.value = res.chunks; total.value = res.total }
@@ -120,7 +131,8 @@ async function loadMeta() {
     doc.value = docs.find(d => d.id === docId)
     if (doc.value?.name) {
       docName.value = doc.value.name
-      tabsStore.updateTabTitle(route.path, doc.value.name)
+      // 页签标题固定「分段详情」，多开时自动编号 -1/-2…，避免长文档名撑爆页签
+      tabsStore.assignSequentialTitle(route.path, '分段详情')
     }
   } catch { /* 名称回退路由 query */ }
 }
@@ -214,7 +226,7 @@ onMounted(() => { loadMeta(); load() })
           <article v-for="(chunk, i) in chunks" :key="chunk.id" class="chunk">
             <div class="chunk-toolbar">
               <div class="chunk-meta">
-                <span class="chunk-index">分段 {{ (page - 1) * 20 + i + 1 }}</span>
+                <span class="chunk-tag" :aria-label="`分段 ${(page - 1) * 20 + i + 1}`">分段 {{ (page - 1) * 20 + i + 1 }}</span>
                 <span class="chunk-length">{{ chunk.content.length }} 字符</span>
               </div>
               <div class="toolbar-spacer" />
@@ -232,10 +244,32 @@ onMounted(() => { loadMeta(); load() })
                   <el-button text type="danger" :icon="Delete" :disabled="busy" @click="removeChunk(chunk)" />
                 </el-tooltip>
               </div>
-              <el-divider direction="vertical" />
+              <el-divider direction="vertical" class="chunk-divider" />
               <div class="switch-line"><el-switch :model-value="chunk.available" :disabled="busy" :aria-label="`分段${(page - 1) * 20 + i + 1}检索状态`" @change="toggleChunk(chunk)" /><span>{{ chunk.available ? '已启用' : '已停用' }}</span></div>
             </div>
-            <div class="chunk-content" v-html="renderChunk(chunk.content)" />
+            <!-- 段落模式：分段号在 meta 标签中；全文父块模式不展示父内容（与解析原文重复） -->
+            <div v-if="!fulltextParent" class="chunk-content" v-html="renderChunk(chunk.content)" />
+            <!-- 子分段（父子分段模式）：子块是检索单元，命中后返回父分段上下文；
+                 全文父块模式直接平铺全部子分段，段落模式默认收起、点击展开 -->
+            <div v-if="chunk.children?.length" class="child-chunks" :class="{main: fulltextParent}">
+              <div class="child-head">
+                <button v-if="!fulltextParent" type="button" class="child-toggle" :aria-expanded="!!expandedChildren[chunk.id]" @click="toggleChildren(chunk)">
+                  <el-icon class="child-caret" :class="{open: !!expandedChildren[chunk.id]}"><ArrowDown /></el-icon>
+                  子分段
+                </button>
+                <span v-else class="child-title">子分段</span>
+                <span class="child-count">{{ chunk.children.length }} 个 · 用于检索命中</span>
+                <el-tooltip content="子分段由解析按父子分段规则生成：向量与词项打分作用于子分段，命中后返回父分段作为上下文。编辑父分段内容不会同步子分段，重新解析后重建。" placement="top">
+                  <el-icon class="child-tip"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </div>
+              <template v-if="fulltextParent || expandedChildren[chunk.id]">
+                <div v-for="(child, j) in chunk.children" :key="child.id" class="child-item">
+                  <span class="child-index">{{ j + 1 }}</span>
+                  <div class="child-content" v-html="renderChunk(child.content)" />
+                </div>
+              </template>
+            </div>
             <div v-if="chunk.important_keywords?.length" class="hint">关键词：{{ chunk.important_keywords.join('、') }}</div>
           </article>
         </div>
@@ -299,20 +333,21 @@ onMounted(() => { loadMeta(); load() })
 .switch-line span { color: var(--el-text-color-regular); font-size: 13px; }
 .el-alert { margin-bottom: 16px; }
 .chunks { flex: 1; min-height: 0; overflow: auto; }
-.chunk { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
-.chunk-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.chunk-meta { display: flex; align-items: center; gap: 10px; }
-.chunk-index {
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
-  padding: 2px 10px;
-  border-radius: 10px;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 18px;
+.chunk { border: 1px solid #e7ebf0; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; background: #fff; }
+.chunk-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.chunk-meta { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* 分段号：蓝色轻底标签（对齐参考稿的「父分段 2」样式） */
+.chunk-tag {
+  flex: none; padding: 1px 8px; border-radius: 4px;
+  background: var(--el-color-primary-light-9); color: var(--el-color-primary);
+  font-size: 12px; font-weight: 600; line-height: 20px;
 }
-.chunk-length { color: var(--el-text-color-secondary); font-size: 12px; }
-.chunk-actions { display: flex; align-items: center; gap: 2px; }
+.chunk-length { color: var(--el-text-color-secondary); font-size: 12px; white-space: nowrap; }
+/* 操作按钮：悬停整卡时浮现，减少行内元素噪音（开关状态始终可见） */
+.chunk-actions { display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity .15s ease; }
+.chunk:hover .chunk-actions, .chunk:focus-within .chunk-actions { opacity: 1; }
+.chunk-divider { opacity: 0; transition: opacity .15s ease; }
+.chunk:hover .chunk-divider, .chunk:focus-within .chunk-divider { opacity: 1; }
 .chunk-actions .el-button { padding: 6px; }
 .chunk-actions .el-button .el-icon { font-size: 16px; }
 .chunk-content { overflow-wrap: anywhere; overflow: auto; line-height: 1.7; }
@@ -320,6 +355,33 @@ onMounted(() => { loadMeta(); load() })
 .chunk-content :deep(table) { border-collapse: collapse; width: 100%; }
 .chunk-content :deep(td), .chunk-content :deep(th) { border: 1px solid var(--el-border-color-lighter); padding: 6px; }
 .chunk-content :deep(img) { max-width: 100%; border-radius: 4px; margin: 6px 0; display: block; }
+
+/* 子分段（父子分段模式）：父卡片内容下方的轻分隔区块；全文父块模式（.main）为卡片主体、无顶部分隔线 */
+.child-chunks { margin-top: 10px; border-top: 1px dashed var(--el-border-color-lighter); padding-top: 8px; }
+.child-chunks.main { margin-top: 0; border-top: none; padding-top: 0; }
+.child-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.child-title { font-size: 13px; font-weight: 600; color: #303133; }
+.child-count { font-size: 12px; color: #909399; }
+.child-tip { color: #c0c4cc; font-size: 14px; cursor: help; }
+/* 子分段开关：浅蓝 chip + 旋转箭头（对齐参考稿「∨ 子分段」样式） */
+.child-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: none; background: var(--el-color-primary-light-9); color: var(--el-color-primary);
+  font-size: 12px; font-weight: 600; line-height: 20px; padding: 1px 8px; border-radius: 4px;
+  cursor: pointer;
+}
+.child-toggle:hover { background: var(--el-color-primary-light-8); }
+.child-caret { font-size: 12px; transition: transform .2s ease; }
+.child-caret.open { transform: rotate(180deg); }
+/* 子分段条目：去卡片化，改为左侧竖向强调条 + 序号徽标的扁平层级（对齐参考稿） */
+.child-item { position: relative; display: flex; gap: 8px; align-items: flex-start; padding: 6px 4px 6px 12px; }
+.child-item::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--el-color-primary-light-5); }
+.child-item:hover { background: #f8fafd; }
+.child-index { flex: none; min-width: 20px; height: 20px; border-radius: 5px; background: var(--el-fill-color); color: var(--el-text-color-secondary); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; margin-top: 2px; /* 与子块首行对齐 */ }
+.child-content { flex: 1; min-width: 0; font-size: 13px; line-height: 1.6; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
+.child-content :deep(img) { max-width: 100%; border-radius: 4px; }
+.child-content :deep(table) { border-collapse: collapse; }
+.child-content :deep(td), .child-content :deep(th) { border: 1px solid var(--el-border-color-lighter); padding: 4px; }
 .el-pagination { margin-top: 16px; justify-content: flex-end; }
 
 /* 右侧预览面板 */

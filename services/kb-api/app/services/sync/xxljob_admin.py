@@ -1,6 +1,6 @@
 """XXL-Job admin API 客户端 + crontab→Quartz cron 转换。
 
-- 登录：POST /login（userName/password），会话 cookie 复用；cookie 失效自动重登一次。
+- 登录：3.x POST /auth/doLogin、2.x POST /login（userName/password，自动探测），会话 cookie 复用；cookie 失效自动重登一次。
 - 作业/执行器组 CRUD 走 admin 的 /jobgroup/*、/jobinfo/*、/joblog/* 表单接口（ReturnT JSON）。
 - 本平台同步源为作业配置唯一事实源：scheduler 模块据此幂等同步作业到 admin。
 """
@@ -90,13 +90,25 @@ class XxlJobAdminClient:
 
     def _login(self) -> requests.Session:
         session = requests.Session()
-        resp = session.post(
-            f"{self.base_url}/login",
-            data={"userName": self.username, "password": self.password},
-            headers=self._headers(), timeout=10, allow_redirects=False)
-        if resp.status_code not in (200, 302) or not session.cookies:
-            raise XxlJobAdminError(f"XXL-Job admin 登录失败（HTTP {resp.status_code}），请检查地址与账号")
-        return session
+        # 登录接口按版本探测：3.x 为 /auth/doLogin，2.x 为 /login（成功可能 200 或 302+cookie）
+        last_status = 0
+        for path in ("/auth/doLogin", "/login"):
+            try:
+                resp = session.post(
+                    f"{self.base_url}{path}",
+                    data={"userName": self.username, "password": self.password},
+                    headers=self._headers(), timeout=10, allow_redirects=False)
+            except requests.RequestException:
+                continue
+            last_status = resp.status_code
+            ok_code = resp.status_code in (200, 302)
+            ok_json = "json" in resp.headers.get("Content-Type", "") and \
+                resp.json().get("code") == 200
+            if ok_code and ok_json and session.cookies:
+                return session
+            session.cookies.clear()
+        raise XxlJobAdminError(
+            f"XXL-Job admin 登录失败（HTTP {last_status or 'unreachable'}），请检查地址与账号")
 
     def _ensure_session(self) -> requests.Session:
         with self._lock:
@@ -137,18 +149,37 @@ class XxlJobAdminClient:
             return payload
         raise XxlJobAdminError(f"XXL-Job admin 接口 {path} 重试后仍失败")
 
+    @staticmethod
+    def _rows(payload: dict) -> list[dict]:
+        """分页响应取行列表：2.x 为 content.data，3.x 为 data.data。"""
+        if not isinstance(payload, dict):
+            return []
+        data = payload.get("data")
+        if isinstance(data, dict):
+            return data.get("data") or []
+        if isinstance(data, list):
+            return data
+        content = payload.get("content")
+        if isinstance(content, dict):
+            return content.get("data") or []
+        return []
+
     # ----- 执行器组 -----
     def ensure_group(self, appname: str, title: str) -> int:
         page = self._post("/jobgroup/pageList", {"start": 0, "length": 100,
                                                   "appname": appname, "title": ""})
-        for row in page.get("data") or []:
+        for row in self._rows(page):
             if row.get("appname") == appname:
                 return int(row["id"])
-        self._post("/jobgroup/add", {"appname": appname, "title": title,
-                                     "order": 1, "addressType": 0})
+        # 2.4.x 创建接口为 /jobgroup/save（旧版为 /jobgroup/add），逐个尝试
+        payload = {"appname": appname, "title": title, "order": 1, "addressType": 0}
+        try:
+            self._post("/jobgroup/save", payload)
+        except XxlJobAdminError:
+            self._post("/jobgroup/add", payload)
         page = self._post("/jobgroup/pageList", {"start": 0, "length": 100,
                                                   "appname": appname, "title": ""})
-        for row in page.get("data") or []:
+        for row in self._rows(page):
             if row.get("appname") == appname:
                 return int(row["id"])
         raise XxlJobAdminError(f"创建执行器组失败: {appname}")
@@ -159,14 +190,17 @@ class XxlJobAdminClient:
         page = self._post("/jobinfo/pageList", {"start": 0, "length": 500, "jobGroup": 0,
                                                  "triggerStatus": -1, "jobDesc": "",
                                                  "executorHandler": "", "author": ""})
-        for row in page.get("data") or []:
+        for row in self._rows(page):
             if int(row.get("id", -1)) == job_id:
                 return row
         return None
 
     def add_job(self, spec: dict) -> int:
         result = self._post("/jobinfo/add", spec)
-        job_id = result.get("content")
+        # 2.x 返回 content=<id>；3.x 返回 data=<id>（dict/list 为异常载荷，忽略）
+        job_id = result.get("content") or (result.get("data")
+                                           if not isinstance(result.get("data"), (dict, list))
+                                           else None)
         if not job_id:
             raise XxlJobAdminError(f"创建作业失败: {result.get('msg')}")
         return int(job_id)
@@ -190,4 +224,4 @@ class XxlJobAdminClient:
     def job_logs(self, job_id: int, length: int = 10) -> list[dict]:
         page = self._post("/joblog/pageList", {"start": 0, "length": length, "jobGroup": 0,
                                                 "jobId": job_id, "logStatus": -1, "filterTime": 0})
-        return page.get("data") or []
+        return self._rows(page)

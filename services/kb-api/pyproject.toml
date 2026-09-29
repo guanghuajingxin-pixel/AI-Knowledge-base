@@ -13,6 +13,7 @@ dependencies = [
     "psycopg[binary]>=3.1",
     "dingtalk-stream>=0.24",
     "pyyaml>=6.0",
+    "pillow>=10.4",
 ]
 [tool.uv.sources]
 kb-common = { path = "../kb-common", editable = true }

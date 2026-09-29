@@ -196,6 +196,24 @@ def _headers(token: str) -> dict[str, str]:
     return {"x-acs-dingtalk-access-token": token, "Content-Type": "application/json"}
 
 
+def _raise_readable(resp: httpx.Response) -> None:
+    """以可读信息抛错：优先透出钉钉 JSON body 的 code/message/所需权限点，
+    避免上层只拿到 httpx 的 "Client error '403 Forbidden' for url ..."。"""
+    try:
+        data = resp.json()
+        msg = data.get("message") or data.get("errmsg") or ""
+        code = data.get("code") or ""
+        scopes = (data.get("accessdenieddetail") or {}).get("requiredScopes") or []
+        if msg:
+            suffix = f"（需开通权限：{', '.join(scopes)}）" if scopes else ""
+            raise RuntimeError(f"钉钉接口拒绝（{resp.status_code} {code}）：{msg}{suffix}")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+    resp.raise_for_status()
+
+
 async def _request_with_retry(method: str, url: str, *, client: httpx.AsyncClient,
                               max_retry: int | None = None,
                               **kwargs) -> httpx.Response:
@@ -222,7 +240,7 @@ async def _request_with_retry(method: str, url: str, *, client: httpx.AsyncClien
                 perm_markers = ("permissiondenied", "requiredscopes", "no.priviledge",
                                 "尚未开通", "accessdenieddetail")
                 if resp.status_code == 403 and any(m in body_low for m in perm_markers):
-                    resp.raise_for_status()
+                    _raise_readable(resp)
                 delay = _RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.5)
                 logger.warning("钉钉请求被限流/错误 %s，%.1fs 后重试(%d/%d): %s",
                                resp.status_code, delay, attempt + 1, attempts, url)
@@ -261,7 +279,7 @@ async def _list_workspaces_remote(timeout: float = 60.0,
             await _throttle()
             resp = await _request_with_retry("GET", url, client=client, max_retry=max_retry,
                                              params=params, headers=_headers(token))
-            resp.raise_for_status()
+            _raise_readable(resp)
             data = resp.json()
             out.extend(data.get("workspaces") or [])
             nxt = data.get("nextToken")
@@ -346,7 +364,7 @@ async def list_nodes(parent_node_id: str,
             await _throttle()
             resp = await _request_with_retry("GET", url, client=client,
                                              params=params, headers=_headers(token))
-            resp.raise_for_status()
+            _raise_readable(resp)
             data = resp.json()
             out.extend(data.get("nodes") or [])
             nxt = data.get("nextToken")

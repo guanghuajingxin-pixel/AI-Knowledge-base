@@ -57,6 +57,20 @@ def _local_storage_dir() -> Path:
     return Path(base)
 
 
+def _parse_whitelist(raw: str) -> set[str]:
+    """解析同步源节点白名单（JSON 数组字符串）→ 节点 ID 集合；非法/空返回空集。"""
+    raw = (raw or "").strip()
+    if not raw or raw == "[]":
+        return set()
+    try:
+        arr = json.loads(raw)
+        if isinstance(arr, list):
+            return {str(x) for x in arr if x}
+    except (ValueError, TypeError):
+        pass
+    return set()
+
+
 class SyncEngine:
     def __init__(self, source: SyncSource):
         self.source = source
@@ -116,6 +130,12 @@ class SyncEngine:
                 # 真实同步不用缓存：必须看到钉钉侧最新增删，缓存仅供预演快速回显
                 nodes = dt.walk_tree(source.root_node_id, s.sync_max_depth,
                                      s.sync_max_results_per_page, use_cache=False)
+                # 节点白名单：非空时只同步指定文档（「添加知识」选择指定文档 + 自动同步）
+                whitelist = _parse_whitelist(getattr(source, "node_whitelist", "") or "")
+                if whitelist:
+                    nodes = [n for n in nodes if n.get("nodeId") in whitelist]
+                    self._log(db, run.id, "INFO",
+                              f"节点白名单生效：仅同步 {len(nodes)} 个指定文档（白名单 {len(whitelist)} 个）")
                 run.total = len(nodes)
                 db.commit()
 
@@ -123,8 +143,13 @@ class SyncEngine:
                 dataset = backend.resolve_dataset(source.dify_dataset_id, source.dify_dataset_name)
                 dataset_id = dataset["id"]
                 dataset_name = dataset.get("name") or source.dify_dataset_name
-                # 知识流水线（rag_pipeline）是 Dify 专属；RAGFlow 一律按普通库处理
-                runtime_mode = dataset_runtime(dataset) if is_dify else "general"
+                # 知识流水线（rag_pipeline）是 Dify 专属；RAGFlow 一律按普通库处理；
+                # library（本地文档库）用自己的扩展名白名单与解析链路
+                backend_type = (source.backend_type or "dify").strip().lower()
+                if backend_type == "library":
+                    runtime_mode = "library"
+                else:
+                    runtime_mode = dataset_runtime(dataset) if is_dify else "general"
                 if runtime_mode == "rag_pipeline":
                     self._log(db, run.id, "INFO",
                               f"目标为知识流水线数据集 “{dataset_name}”，走 pipeline/run 同步通道")
@@ -295,6 +320,17 @@ class SyncEngine:
         try:
             self._progress(db, run, f"下载/导出文档: {name}")
             local_file, content_hash = self._fetch(dt, node, name, base_dir, rel_dir)
+            # library 模式增量跳过：上一轮已同步成功且内容未变化时，跳过重新上传/解析。
+            # 否则每 5 分钟 cron 都会把文档删掉重新走 MinerU 解析（耗时且状态反复抖动）。
+            # Dify/RAGFlow 通道保持「一律重新同步」的既有口径，不受影响。
+            if (runtime_mode == "library" and mapping is not None
+                    and mapping.status == "synced" and mapping.content_hash == content_hash):
+                self._log(db, run_id, "INFO", f"内容未变化，跳过: {name}")
+                if task is not None:
+                    task.status = "success"
+                    task.finished_at = datetime.utcnow()
+                    task.error = ""
+                return "skipped", ""
             # 用户口径：预演开关打开的文档一律老实同步，不做内容 hash 跳过；
             # 已同步过的走更新，未同步过的新建。
             # 源文档直传：下载文件保留源扩展名（缺失时按 OSS 文件名/节点 extension 补齐），

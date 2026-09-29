@@ -17,6 +17,7 @@ sys.path.insert(0, str(_REPO_ROOT / "services" / "kb-common"))
 
 from kb_common.config import get_settings  # noqa: E402
 from kb_common.models import Base  # noqa: E402  - imports all model classes so they register on Base.metadata
+from kb_common import material_models  # noqa: E402,F401 - material library tables
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

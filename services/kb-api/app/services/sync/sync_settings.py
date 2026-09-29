@@ -73,16 +73,47 @@ def make_ragflow_client(db):
     return RagflowSyncClient(vals["ragflow_base_url"], vals["ragflow_api_key"])
 
 
-def make_backend(source, db):
-    """按同步源的 backend_type 返回目标引擎客户端（dify | ragflow）。
+def make_library_backend(source):
+    """构建文档库（document-libraries）同步后端。
 
-    source 可传 SyncSource 对象，或直接传 backend_type 字符串（路由层校验时用）。
-    两种客户端暴露同一套方法面（resolve_dataset/upload_file/update_file/
+    目标库 ID 复用 dify_dataset_id 列（backend_type=library 时存本地文档库 ID）。
+    source 可为 SyncSource 对象或 dict（路由层创建/更新时）。
+    """
+    from app.services.sync.library_backend import LibraryBackend
+    if isinstance(source, dict):
+        dataset_id = source.get("dify_dataset_id") or ""
+        src_id = source.get("id", "?")
+    else:
+        dataset_id = getattr(source, "dify_dataset_id", "") or ""
+        src_id = getattr(source, "id", "?")
+    try:
+        library_id = int(dataset_id)
+    except (ValueError, TypeError):
+        raise ValueError(f"同步源 {src_id} 的文档库 ID 无效：{dataset_id!r}")
+    return LibraryBackend(library_id)
+
+
+def make_backend(source, db):
+    """按同步源的 backend_type 返回目标引擎客户端（dify | ragflow | library）。
+
+    source 可传 SyncSource 对象、dict（路由层创建/更新时），
+    或直接传 backend_type 字符串（路由层校验时用，仅 dify/ragflow 支持）。
+    各客户端暴露同一套方法面（resolve_dataset/upload_file/update_file/
     delete_document/wait_indexing/close），SyncEngine 无需区分具体引擎；
     Dify 专属的知识流水线逻辑由 engine 用 backend_type=='dify' 守卫。
+    library 后端写入本地文档库（MinIO + LibraryDocument + MinerU 解析）。
     """
-    backend_type = source if isinstance(source, str) else getattr(source, "backend_type", "dify")
-    backend_type = (backend_type or "dify").strip().lower()
+    if isinstance(source, str):
+        backend_type = source
+        target = source
+    else:
+        backend_type = (getattr(source, "backend_type", None)
+                        if not isinstance(source, dict)
+                        else source.get("backend_type")) or "dify"
+        target = source
+    backend_type = backend_type.strip().lower()
     if backend_type == "ragflow":
         return make_ragflow_client(db)
+    if backend_type == "library":
+        return make_library_backend(target)
     return make_dify_client(db)

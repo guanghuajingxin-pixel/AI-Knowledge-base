@@ -154,6 +154,16 @@ def _serialize_pipeline_inputs(value) -> str:
     return _json.dumps(value, ensure_ascii=False)
 
 
+def _serialize_node_whitelist(value) -> str:
+    """node_whitelist 在 schema 里是 list，ORM 列是 Text，存 JSON 字符串。"""
+    import json as _json
+    if value is None:
+        return "[]"
+    if isinstance(value, str):
+        return value or "[]"
+    return _json.dumps(value, ensure_ascii=False)
+
+
 @router.get("/pipeline-variables",
             dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 def pipeline_variables(dataset_id: str = Query(...), db=Depends(get_sync_db)):
@@ -280,10 +290,21 @@ def create_source(payload: SyncSourceCreate, u=Depends(require_role("super_admin
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     data["pipeline_inputs"] = _serialize_pipeline_inputs(data.get("pipeline_inputs"))
-    client = make_backend(data.get("backend_type", "dify"), db)
+    data["node_whitelist"] = _serialize_node_whitelist(data.get("node_whitelist"))
+    # library 后端需要完整 dict（从 dify_dataset_id 读文档库 ID）；
+    # dify/ragflow 传 backend_type 字符串即可（历史行为不变）
+    backend_type = (data.get("backend_type") or "dify").strip().lower()
+    if backend_type == "library":
+        if not (data.get("dify_dataset_id") or "").strip():
+            raise HTTPException(status_code=422, detail="请指定目标文档库")
+        client = make_backend(data, db)
+    else:
+        client = make_backend(backend_type, db)
     try:
         dataset = client.resolve_dataset(data.get("dify_dataset_id"), data["dify_dataset_name"])
     except DifyError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     finally:
         client.close()
@@ -298,6 +319,11 @@ def create_source(payload: SyncSourceCreate, u=Depends(require_role("super_admin
     db.refresh(source)
     # 新建源也必须立即注册 cron；否则只能等服务重启或下一次编辑后才会执行。
     reload_sync_jobs()
+    # 「添加知识」（library 后端）：创建后立即跑首次同步（进程内直跑，绕过调度往返），
+    # 不必等下一个 cron 刻度；后续周期同步仍由 cron 驱动。
+    if backend_type == "library" and source.enabled:
+        from app.services.sync.scheduler import trigger_first_sync
+        trigger_first_sync(source.id, getattr(u, "username", "") or "")
     return source
 
 
@@ -326,13 +352,21 @@ def update_source(source_id: int, payload: SyncSourceUpdate, db=Depends(get_sync
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     if "pipeline_inputs" in updates:
         updates["pipeline_inputs"] = _serialize_pipeline_inputs(updates.get("pipeline_inputs"))
+    if "node_whitelist" in updates:
+        updates["node_whitelist"] = _serialize_node_whitelist(updates.get("node_whitelist"))
     if "owner_user_id" in updates:
         import uuid as _uuid
         raw = updates["owner_user_id"]
         updates["owner_user_id"] = _uuid.UUID(raw) if raw else None
     if "dify_dataset_id" in updates or "dify_dataset_name" in updates:
         backend_type = updates.get("backend_type") or source.backend_type or "dify"
-        client = make_backend(backend_type, db)
+        if backend_type == "library":
+            target_id = updates.get("dify_dataset_id", source.dify_dataset_id)
+            if not (target_id or "").strip():
+                raise HTTPException(status_code=422, detail="请指定目标文档库")
+            client = make_backend({"backend_type": "library", "dify_dataset_id": target_id}, db)
+        else:
+            client = make_backend(backend_type, db)
         try:
             target_id = updates.get("dify_dataset_id", source.dify_dataset_id)
             # 兼容旧前端只按名称改目标；新前端始终携带 ID。
@@ -340,6 +374,8 @@ def update_source(source_id: int, payload: SyncSourceUpdate, db=Depends(get_sync
                 target_id = None
             dataset = client.resolve_dataset(target_id, updates.get("dify_dataset_name") or source.dify_dataset_name)
         except DifyError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         finally:
             client.close()
