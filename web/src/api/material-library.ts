@@ -53,3 +53,5 @@ export const searchMaterialImages = (lib: number, file: File, params: { top_k: n
   if (params.crop) form.append('crop', JSON.stringify(params.crop))
   return request.post<unknown, ImageSearchResult>(`/material-libraries/${lib}/search`, form, { timeout: 300000 })
 }
+
+export const testImageConnection = (id: string) => request.post<unknown, { ok: boolean; dimensions: number | null; elapsed_ms: number }>(`/image-components/${id}/test-connection`, {}, { timeout: 180000 })

@@ -150,6 +150,29 @@ async def delete_component(component_id: UUID, s: AsyncSession = Depends(get_ses
     return {"ok": True}
 
 
+@components_router.post("/{component_id}/test-connection", dependencies=[Depends(admin)])
+async def test_connection(component_id: UUID, s: AsyncSession = Depends(get_session)):
+    """Exercise the saved credentials and model with a small, built-in probe."""
+    import io
+    from PIL import Image, ImageDraw
+    row = await s.get(ImageComponent, component_id)
+    if not row:
+        raise HTTPException(404, "组件不存在")
+    await s.commit()
+    probe = Image.new("RGB", (256, 256), "white")
+    ImageDraw.Draw(probe).ellipse((48, 48, 208, 208), fill="steelblue")
+    buffer = io.BytesIO()
+    probe.save(buffer, "PNG")
+    start = time.monotonic()
+    try:
+        standard, _ = await p.prepare(buffer.getvalue(), row if row.kind == "remover" else None)
+        vector = await p.embed(standard, row) if row.kind == "embedding" else None
+        return {"ok": True, "dimensions": len(vector) if vector else None,
+                "elapsed_ms": round((time.monotonic()-start)*1000)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @components_router.post("/{component_id}/test", dependencies=[Depends(admin)])
 async def test_component(component_id: UUID, file: UploadFile = File(...), crop: str = Form(""), s: AsyncSession = Depends(get_session)):
     row = await s.get(ImageComponent, component_id)

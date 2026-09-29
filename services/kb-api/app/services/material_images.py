@@ -193,7 +193,11 @@ async def request_component(component, **kwargs) -> httpx.Response:
                     if size > MAX_BYTES:
                         raise ValueError("模型服务返回内容超过 20MB")
                     chunks.append(part)
-                return httpx.Response(response.status_code, headers=response.headers, content=b"".join(chunks))
+                # aiter_bytes already decompresses the upstream body. Do not
+                # retain encoding/length headers and decode it a second time.
+                decoded_headers = {k: v for k, v in response.headers.items()
+                                   if k.lower() not in {"content-encoding", "content-length", "transfer-encoding"}}
+                return httpx.Response(response.status_code, headers=decoded_headers, content=b"".join(chunks))
     except httpx.TimeoutException as exc:
         raise ValueError("模型服务调用超时，请稍后重试") from exc
     except httpx.HTTPError as exc:

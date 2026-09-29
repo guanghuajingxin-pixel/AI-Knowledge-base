@@ -86,6 +86,39 @@ class ModelContractsTests(unittest.IsolatedAsyncioTestCase):
             response = await client.post('/api/v1/image-components', json={})
             self.assertEqual(response.status_code, 403)
 
+    async def test_gzip_model_response_is_decoded_once(self):
+        import gzip
+        import json
+        component = SimpleNamespace(api_key="secret", endpoint="https://model.example/embed")
+        payload = {"output": {"embeddings": [{"embedding": [1.0] * 64}]}}
+        transport = httpx.MockTransport(lambda request: httpx.Response(200,
+            headers={"content-encoding": "gzip", "content-type": "application/json"},
+            content=gzip.compress(json.dumps(payload).encode())))
+        original = httpx.AsyncClient
+        with patch.object(p.httpx, "AsyncClient", side_effect=lambda **kw: original(transport=transport, **kw)):
+            result = await p.request_component(component, json={})
+        self.assertEqual(result.json(), payload)
+        self.assertNotIn("content-encoding", result.headers)
+
+    async def test_connection_uses_saved_component_and_safe_errors(self):
+        from app.routes import material_library as routes
+        from fastapi import HTTPException
+        component = SimpleNamespace(kind="embedding")
+        session = AsyncMock(); session.get.return_value = component
+        with patch.object(p, "embed", new=AsyncMock(return_value=[1.0]*1024)) as embed:
+            result = await routes.test_connection("id", session)
+            self.assertEqual(result["dimensions"], 1024)
+            self.assertTrue(result["ok"])
+            self.assertIs(embed.call_args.args[1], component)
+        with patch.object(p, "embed", new=AsyncMock(side_effect=ValueError("模型服务鉴权失败"))):
+            with self.assertRaises(HTTPException) as error:
+                await routes.test_connection("id", session)
+            self.assertEqual(error.exception.status_code, 422)
+        session.get.return_value = None
+        with self.assertRaises(HTTPException) as error:
+            await routes.test_connection("missing", session)
+        self.assertEqual(error.exception.status_code, 404)
+
     async def test_queue_failure_is_visible_and_retryable(self):
         from app.routes import material_library as routes
         from unittest.mock import Mock
