@@ -7,6 +7,8 @@ import { User, Lock, Reading } from '@element-plus/icons-vue'
 import { getDingtalkConfig, type DingtalkConfig } from '@/api/auth'
 import { gotoDingtalkAuth, loginDestination, safeRedirect } from '@/utils/dingtalk-auth'
 import type { LoginResponse } from '@/types/user'
+import { authConfig, authError, sso } from '@/auth/session'
+import { ElAlert, ElButton } from 'element-plus'
 
 const router = useRouter()
 const route = useRoute()
@@ -28,6 +30,7 @@ const rules: FormRules = {
 // 钉钉扫码配置：qr_login_enabled=true 时才展示「钉钉扫码」页签
 const dtConfig = ref<DingtalkConfig | null>(null)
 onMounted(async () => {
+  if (authConfig.value?.provider !== 'local') return
   try {
     dtConfig.value = await getDingtalkConfig()
   } catch {
@@ -77,16 +80,27 @@ function handleDingtalkLogin() {
     ElMessage.error('跳转钉钉授权页失败，请重试')
   }
 }
+function reloadPage() { window.location.reload() }
+async function handleSsoLogin() {
+  try { await sso.login(safeRedirect(route.query.redirect, '/chat')) }
+  catch (error) { authError.value = error instanceof Error ? error.message : '统一登录失败，请重试。' }
+}
 </script>
 
 <template>
   <div class="login-page">
     <div class="login-card">
       <div class="login-header">
-        <el-icon size="40" color="#409EFF"><Reading /></el-icon>
+        <el-icon size="40" color="var(--el-color-primary)"><Reading /></el-icon>
         <h2>知识治理专家</h2>
       </div>
-      <el-tabs v-model="activeTab" stretch>
+      <el-alert v-if="authError" :title="authError" type="error" :closable="false" show-icon />
+      <div v-if="authConfig?.provider === 'keycloak'" class="dt-pane">
+        <p class="dt-desc">使用杰克科技统一账号，与 AIGC 门户共享登录身份和权限。</p>
+        <el-button type="primary" style="width: 100%" @click="handleSsoLogin">使用企业统一账号登录</el-button>
+      </div>
+      <el-button v-if="!authConfig" style="width: 100%; margin-top: 16px" @click="reloadPage">重试连接</el-button>
+      <el-tabs v-if="authConfig?.provider === 'local'" v-model="activeTab" stretch>
         <el-tab-pane label="密码登录" name="password">
           <el-form
             ref="formRef"

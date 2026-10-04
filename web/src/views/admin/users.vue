@@ -6,6 +6,8 @@ import PageContainer from '@/components/common/PageContainer.vue'
 import { getUsers, createUser, updateUser, deleteUser, unbindDingtalk } from '@/api/users'
 import type { UserInfo, UserRole } from '@/types/user'
 import { formatDate } from '@/utils/format'
+import { authConfig } from '@/auth/session'
+import UnifiedAccountPanel from '@/components/common/unified-account-panel.vue'
 
 const users = ref<UserInfo[]>([])
 const loading = ref(false)
@@ -201,11 +203,12 @@ function handleMoreCommand(command: string, row: UserInfo) {
   else if (command === 'delete') handleDelete(row)
 }
 
-onMounted(fetchData)
+onMounted(() => { if (authConfig.value?.provider !== 'keycloak') void fetchData() })
 </script>
 
 <template>
-  <PageContainer title="用户管理">
+  <UnifiedAccountPanel v-if="authConfig?.provider === 'keycloak'" administration />
+  <PageContainer v-else title="用户管理">
     <template #actions>
       <el-button type="primary" :icon="Plus" @click="openCreate">新建用户</el-button>
     </template>

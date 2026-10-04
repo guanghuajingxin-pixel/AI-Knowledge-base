@@ -1,6 +1,7 @@
 import request from './request'
 import type { SearchResult } from '@/types/search'
 import { useUserStore } from '@/stores/user'
+import { sso } from '@/auth/session'
 
 export interface ChatRequest {
   query: string
@@ -117,13 +118,13 @@ export function streamChat(
 ) {
   const controller = new AbortController()
   const userStore = useUserStore()
-  const token = userStore.token
   const baseUrl = (import.meta as any).env?.VITE_API_BASE_URL || '/api/v1'
   // 是否已收到终止事件：据此判定流是否「异常收尾」，避免调用方运行态永久挂起
   let sawTerminal = false
 
   ;(async () => {
     try {
+      const token = sso.isSso ? await sso.getToken() : userStore.token
       const resp = await fetch(`${baseUrl}/search/chat/stream`, {
         method: 'POST',
         headers: {

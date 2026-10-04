@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kb_common.database import get_session
 from kb_common.models import DingtalkBinding, Setting, User
 from kb_common.security import verify_password, hash_password
+from kb_common.oidc import enabled, oidc_config, require_local_auth
 from pydantic import BaseModel, field_validator
 
 from app.deps import get_current_user
@@ -33,6 +34,7 @@ class LoginIn(BaseModel):
 
 @router.post("/login")
 async def login(body: LoginIn, s: AsyncSession = Depends(get_session)):
+    require_local_auth()
     u = (await s.execute(select(User).where(User.username == body.username))).scalar_one_or_none()
     if not u or not verify_password(body.password, u.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
@@ -64,6 +66,7 @@ async def set_password(body: SetPasswordIn, request: Request,
                        u: User = Depends(get_current_user),
                        s: AsyncSession = Depends(get_session)):
     """首次设密：钉钉建档 / 管理员重置后 must_change_password=true 的用户必经此接口。"""
+    require_local_auth()
     tu = await s.get(User, u.id)
     if not tu:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
@@ -89,6 +92,7 @@ async def set_password(body: SetPasswordIn, request: Request,
 async def change_password(body: ChangePasswordIn, request: Request,
                           u: User = Depends(get_current_user),
                           s: AsyncSession = Depends(get_session)):
+    require_local_auth()
     tu = await s.get(User, u.id)
     if not tu:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
@@ -118,6 +122,8 @@ class DingtalkLoginIn(BaseModel):
 async def dingtalk_config(request: Request, redirect_uri: str = "",
                           s: AsyncSession = Depends(get_session)):
     """公开端点：H5 免登 / PC 扫码前置（corpId + appKey + 开关）。未配置 corpId 时前端回退账号登录。"""
+    if enabled():
+        return {"corp_id": "", "app_key": "", "auto_login_enabled": False, "qr_login_enabled": False, "redirect_uri": ""}
     rows = (await s.execute(select(Setting).where(Setting.key.in_(
         ["dingtalk_corp_id", "dingtalk_app_key", "dingtalk_qr_login_enabled"])))).scalars().all()
     cfg = {r.key: (r.value or "").strip() for r in rows}
@@ -139,6 +145,7 @@ async def dingtalk_config(request: Request, redirect_uri: str = "",
 @router.post("/dingtalk-login")
 async def dingtalk_login(body: DingtalkLoginIn, s: AsyncSession = Depends(get_session)):
     """钉钉认证登录：H5 免登 / PC 扫码 → 员工身份 → 本地用户（首次自动建档+强制设密）→ JWT。"""
+    require_local_auth()
     from kb_common.clients import dingtalk_client
     from app.services.dingtalk_identity import issue_token, resolve_user
 
@@ -175,6 +182,7 @@ async def bind_my_dingtalk(body: BindDingtalkIn, request: Request,
                            u: User = Depends(get_current_user),
                            s: AsyncSession = Depends(get_session)):
     """已登录账号绑定钉钉身份：老用户（密码账号）接入按用户维度的钉钉权限。"""
+    require_local_auth()
     from kb_common.clients import dingtalk_client
     from app.services import dingtalk_operator
     from app.services.dingtalk_identity import issue_token
@@ -211,3 +219,9 @@ async def bind_my_dingtalk(body: BindDingtalkIn, request: Request,
     out = issue_token(u, binding)
     out["ok"] = True
     return out
+
+
+@router.get("/config")
+async def authentication_config():
+    """Public metadata only; client IDs are public, no secrets are exposed."""
+    return oidc_config()

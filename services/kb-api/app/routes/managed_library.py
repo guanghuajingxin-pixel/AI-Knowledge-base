@@ -21,7 +21,8 @@ from app.services.knowledge_engines import EngineError, MinerUEngine, MinerUClou
 from app.services.knowledge_engines.local_chunker import chunk_markdown
 from kb_common.config import get_settings
 from kb_common.database import get_session
-from kb_common.models import EmbeddingProfile, KnowledgeLibrary, LibraryChunk, LibraryDocument, Setting, User
+from kb_common.models import (EmbeddingProfile, KnowledgeLibrary, LibraryChunk,
+                              LibraryDocument, RerankProfile, Setting, User)
 
 router = APIRouter(prefix="/api/v1/document-libraries", tags=["document-libraries"],
     dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
@@ -182,6 +183,21 @@ def _library_engine_config(body: LibraryIn) -> dict:
             "retrieval": body.retrieval.model_dump() if body.retrieval else {}}
 
 
+async def _validate_retrieval_model(s: AsyncSession, body: LibraryIn) -> None:
+    """检索设置中的 Rerank 模型必须是「模型配置」里已生效的模型；空值=用全局生效配置。"""
+    r = body.retrieval
+    if not (r and r.rerank and r.rerank_model_id.strip()):
+        return
+    try:
+        rid = uuid.UUID(r.rerank_model_id.strip())
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "所选 Rerank 模型无效")
+    row = await s.get(RerankProfile, rid)
+    if row is None or not row.enabled:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "所选 Rerank 模型未生效，请先在「模型配置」中启用后再选择")
+
+
 def _library_config(lib) -> dict:
     """库级配置输出：与文档级 {processing, strategy, enhancements, type_rules} 结构对齐
     （外加库级 retrieval 检索设置）；旧库未存 strategy 时按 processing 推导
@@ -203,7 +219,7 @@ def lib_out(lib, count=0):
 
 
 def doc_out(doc):
-    return {key: getattr(doc, key) for key in ("id", "name", "size", "status", "progress", "message", "chunk_count", "enabled", "source", "parsed_at", "tags", "created_at", "updated_at")} | \
+    return {key: getattr(doc, key) for key in ("id", "name", "size", "status", "progress", "message", "chunk_count", "enabled", "source", "source_url", "source_workspace_name", "updated_by", "expire_at", "parsed_at", "tags", "created_at", "updated_at")} | \
            {"config": doc.engine_config or {}}
 
 
@@ -229,6 +245,7 @@ async def list_libraries(s: AsyncSession = Depends(get_session)):
 
 @router.post("")
 async def create_library(body: LibraryIn, user: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
+    await _validate_retrieval_model(s, body)
     lib = KnowledgeLibrary(name=body.name, description=body.description, platform="mineru",
         dataset_id=uuid.uuid4().hex, library_type="document", enabled=True, creator=user.username,
         engine_config=_library_engine_config(body))
@@ -257,6 +274,7 @@ async def embedding_models(s: AsyncSession = Depends(get_session)):
 
 @router.put("/{library_id}")
 async def configure_library(library_id: int, body: LibraryIn, s: AsyncSession = Depends(get_session)):
+    await _validate_retrieval_model(s, body)
     lib = await library(s, library_id, lock=True)
     lib.name, lib.description = body.name, body.description
     lib.engine_config = _library_engine_config(body)
@@ -292,7 +310,8 @@ def _staging_prefix(library_id: int, staging_id) -> str:
 
 
 @router.post("/{library_id}/documents")
-async def upload(library_id: int, file: UploadFile = File(...), s: AsyncSession = Depends(get_session)):
+async def upload(library_id: int, file: UploadFile = File(...),
+                 user: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     await library(s, library_id)
     name = _validated_upload_name(file.filename)
     content = await file.read(_MAX_UPLOAD_BYTES + 1)
@@ -303,7 +322,8 @@ async def upload(library_id: int, file: UploadFile = File(...), s: AsyncSession 
     key = f"document-libraries/{library_id}/{doc_id}/{name}"
     await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW, key, content)
     doc = LibraryDocument(id=doc_id, library_id=library_id, name=name, storage_path=key, size=len(content),
-                          status="UPLOADED", progress=0, message="", chunk_count=0)
+                          status="UPLOADED", progress=0, message="", chunk_count=0,
+                          updated_by=user.username)
     s.add(doc)
     await s.commit()
     await s.refresh(doc)
@@ -355,7 +375,8 @@ async def staging_discard(library_id: int, body: StagingDiscardIn, s: AsyncSessi
 
 
 @router.post("/{library_id}/documents/commit")
-async def staging_commit(library_id: int, body: StagingCommitIn, s: AsyncSession = Depends(get_session)):
+async def staging_commit(library_id: int, body: StagingCommitIn,
+                         user: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     """确认暂存文件入库：暂存对象迁移到正式路径 → 建文档记录 → 自动解析。
 
     逐项处理互不阻断；迁移/入库失败的项目清理其暂存对象并记入 errors，
@@ -379,7 +400,8 @@ async def staging_commit(library_id: int, body: StagingCommitIn, s: AsyncSession
                 minio_client.delete_prefix(minio_client.RAW, staging_prefix)
             await asyncio.to_thread(migrate)
             doc = LibraryDocument(id=doc_id, library_id=library_id, name=name, storage_path=key,
-                                  size=item.size, status="UPLOADED", progress=0, message="", chunk_count=0)
+                                  size=item.size, status="UPLOADED", progress=0, message="", chunk_count=0,
+                                  updated_by=user.username)
             s.add(doc)
             await s.commit()
             await s.refresh(doc)
@@ -410,7 +432,7 @@ class DingTalkImportIn(BaseModel):
 
 @router.post("/{library_id}/import-dingtalk")
 async def import_dingtalk(library_id: int, body: DingTalkImportIn,
-                          s: AsyncSession = Depends(get_session)):
+                          user: User = Depends(get_current_user), s: AsyncSession = Depends(get_session)):
     """从钉钉知识库导入文档到文档库。
 
     支持两种模式：
@@ -434,6 +456,20 @@ async def import_dingtalk(library_id: int, body: DingTalkImportIn,
         dt = make_dingtalk_client(sync_db)
 
     try:
+        # 知识库名称映射（workspaceId → 名称）：固化到文档行，供知识中心展示来源系统
+        try:
+            ws_names = {ws.get("workspaceId"): ws.get("name", "")
+                        for ws in dt.list_workspaces() if ws.get("workspaceId")}
+        except Exception:
+            ws_names = {}
+
+        def _dt_source(node: dict) -> dict:
+            """钉钉来源固化信息：在线文档链接 + 知识库名称。"""
+            node_id = node.get("nodeId") or node.get("node_id", "")
+            ws_id = node.get("workspaceId") or node.get("workspace_id", "") or body.workspace_id
+            return {"source_url": f"https://alidocs.dingtalk.com/i/nodes/{node_id}" if node_id else None,
+                    "source_workspace_name": ws_names.get(ws_id) or None}
+
         # 确定要导入的节点列表
         nodes_to_import: list[dict] = []
         if body.node_ids:
@@ -483,10 +519,12 @@ async def import_dingtalk(library_id: int, body: DingTalkImportIn,
                     key = f"document-libraries/{library_id}/{doc_id}/{file_name}"
                     await asyncio.to_thread(minio_client.upload_bytes, minio_client.RAW, key, content)
 
-                    # 创建文档记录（source=dingtalk：钉钉知识库同步来源，与本地上传区分）
+                    # 创建文档记录（source=dingtalk：钉钉知识库同步来源，与本地上传区分；
+                    # 固化钉钉链接与知识库名称，更新人=导入操作者）
                     doc = LibraryDocument(id=doc_id, library_id=library_id, name=file_name,
                                           storage_path=key, size=len(content), source="dingtalk",
-                                          status="UPLOADED", progress=0, message="", chunk_count=0)
+                                          status="UPLOADED", progress=0, message="", chunk_count=0,
+                                          updated_by=user.username, **_dt_source(node))
                     s.add(doc)
                     await s.commit()
                     await s.refresh(doc)
@@ -759,21 +797,13 @@ async def _do_parse(s: AsyncSession, library_id: int, doc_id: uuid.UUID):
 
 @image_router.get("/{library_id}/documents/{doc_id}/images/{image_name}")
 async def serve_image(library_id: int, doc_id: uuid.UUID, image_name: str,
-                      token: str = Query("", max_length=2000),
+                      token: str = Query("", max_length=16384),
                       s: AsyncSession = Depends(get_session)):
     """分段内图片代理：<img> 无法携带 Authorization 头，JWT 改走 ?token= query。
     角色要求与文档库主路由一致（super_admin/admin/editor），不能挂在主 router 上
     （其 router 级 Bearer 依赖会拒绝无头请求）。"""
-    from kb_common.security import decode_jwt
-    try:
-        payload = decode_jwt(token)
-    except Exception:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "无效凭证")
-    from kb_common.database import short_session
-    async with short_session() as s_check:
-        user = await s_check.get(User, payload["sub"])
-    if not user or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不可用")
+    from kb_common.oidc import authenticate
+    user = await authenticate(token)
     if user.role not in ("super_admin", "admin", "editor"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "权限不足")
 
@@ -804,6 +834,8 @@ async def parse(library_id: int, doc_id: uuid.UUID, s: AsyncSession = Depends(ge
     lib, doc = await bound_document(s, library_id, doc_id, lock=True)
     if doc.status == "PARSING":
         raise HTTPException(409, "文档正在解析，请等待完成或停止后重试")
+    if doc.status == "PENDING":
+        raise HTTPException(409, "文档待同步，同步完成后可解析")
     await _do_parse(s, library_id, doc_id)
     await s.refresh(doc)
     return doc_out(doc)
@@ -886,6 +918,8 @@ async def configure_document(library_id: int, doc_id: uuid.UUID, body: DocumentC
 @router.get("/{library_id}/documents/{doc_id}/original")
 async def original(library_id: int, doc_id: uuid.UUID, s: AsyncSession = Depends(get_session)):
     _, doc = await bound_document(s, library_id, doc_id)
+    if doc.status == "PENDING":
+        raise HTTPException(409, "文档待同步，暂无原件")
     from kb_common.clients import minio_client
     from urllib.parse import quote
     def read():
@@ -912,6 +946,8 @@ async def preview_original(library_id: int, doc_id: uuid.UUID, s: AsyncSession =
     from datetime import timedelta
     from kb_common.clients import minio_client
     _, doc = await bound_document(s, library_id, doc_id)
+    if doc.status == "PENDING":
+        raise HTTPException(409, "文档待同步，暂无原件")
     # presigned URL 必须原样保留（签名只覆盖原始 query）
     presigned = minio_client.minio.presigned_get_object(
         minio_client.RAW, doc.storage_path, expires=timedelta(hours=1))
@@ -1029,6 +1065,15 @@ async def delete_document(library_id: int, doc_id: uuid.UUID, s: AsyncSession = 
     lib, doc = await bound_document(s, library_id, doc_id, lock=True)
     if doc.status == "PARSING":
         raise HTTPException(409, "请先停止解析再删除")
+    # 级联取消批处理模式下关联该文档的排队同步任务（PENDING 文档删除后无需再同步）
+    from datetime import datetime as _dt
+
+    from kb_common.models import SyncTask
+    from sqlalchemy import update as _sa_update
+    await s.execute(_sa_update(SyncTask).where(
+        SyncTask.library_document_id == str(doc.id),
+        SyncTask.status == "pending",
+    ).values(status="failed", finished_at=_dt.utcnow(), error="目标文档已删除，任务取消"))
     # Keep original object for disaster recovery; local catalog entry (and chunks) removed.
     await s.delete(doc)
     await s.commit()
@@ -1063,6 +1108,8 @@ async def export_library(library_id: int, s: AsyncSession = Depends(get_session)
             for doc in docs:
                 if doc.status == "PARSING":
                     raise HTTPException(409, "文档正在解析，请完成后再导出")
+                if doc.status == "PENDING":
+                    raise HTTPException(409, "有文档待同步，请同步完成后再导出")
                 original_path = f"originals/{doc.id}/{doc.name}"
                 def archive_original():
                     response = minio_client.minio.get_object(minio_client.RAW, doc.storage_path)

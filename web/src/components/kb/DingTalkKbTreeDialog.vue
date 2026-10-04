@@ -213,15 +213,15 @@ onMounted(loadWorkspaces)
 }
 
 .kb-item.selected {
-  background: #ecf5ff;
+  background: var(--el-color-primary-light-9);
 }
 
 .kb-icon {
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: #ecf5ff;
-  color: #409eff;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -250,7 +250,7 @@ onMounted(loadWorkspaces)
 }
 
 .check-icon {
-  color: #409eff;
+  color: var(--el-color-primary);
   font-size: 16px;
   flex-shrink: 0;
 }

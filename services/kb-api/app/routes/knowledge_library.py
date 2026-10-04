@@ -188,6 +188,11 @@ async def retrieval_test(body: RetrievalTestIn,
     ok/失败原因（如 RAGFlow code 102 无权数据集）与命中分段，
     检索参数原样回显方便与引擎侧测试对齐。
     """
+    return await execute_retrieval(body, s)
+
+
+async def execute_retrieval(body: RetrievalTestIn, s: AsyncSession, *, public: bool = False):
+    """Shared retrieval implementation; public calls must name enabled libraries explicitly."""
     import time as _time
 
     from kb_common.clients import dify_client, ragflow_client
@@ -197,9 +202,15 @@ async def retrieval_test(body: RetrievalTestIn,
         raise HTTPException(422, "检索词不能为空")
 
     q = select(KnowledgeLibrary).where(KnowledgeLibrary.library_type != "material")
+    if public:
+        if not body.library_ids:
+            raise HTTPException(422, "必须指定知识库")
+        q = q.where(KnowledgeLibrary.enabled.is_(True))
     if body.library_ids:
         q = q.where(KnowledgeLibrary.id.in_(body.library_ids))
     libs = (await s.execute(q.order_by(KnowledgeLibrary.platform, KnowledgeLibrary.id))).scalars().all()
+    if public and {lib.id for lib in libs} != set(body.library_ids):
+        raise HTTPException(403, "指定知识库不存在或未开放检索")
     if not libs:
         raise HTTPException(404, "未找到指定知识库")
 

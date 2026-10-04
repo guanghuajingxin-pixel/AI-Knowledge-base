@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from kb_common.models import User, ApiKey, DingtalkBinding
 from kb_common.security import hash_password
+from kb_common.oidc import require_local_auth, enabled, oidc_config
 from kb_common.config import get_settings
 import secrets, hashlib, uuid
 from pydantic import BaseModel
@@ -85,6 +86,7 @@ async def list_users(u: User = Depends(require_role("super_admin", "admin")),
 async def create_user(body: UserCreate, request: Request,
                       u: User = Depends(require_role("super_admin", "admin")),
                       s: AsyncSession = Depends(get_session)):
+    require_local_auth()
     if body.role not in VALID_ROLES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法角色: {body.role}")
     if (await s.execute(select(User).where(User.username == body.username))).scalar_one_or_none():
@@ -103,6 +105,7 @@ async def create_user(body: UserCreate, request: Request,
 async def update_user(user_id: uuid.UUID, body: UserUpdate, request: Request,
                       u: User = Depends(require_role("super_admin", "admin")),
                       s: AsyncSession = Depends(get_session)):
+    require_local_auth()
     tu = await s.get(User, user_id)
     if not tu:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
@@ -148,6 +151,7 @@ async def update_user(user_id: uuid.UUID, body: UserUpdate, request: Request,
 async def delete_user(user_id: uuid.UUID, request: Request,
                       u: User = Depends(require_role("super_admin", "admin")),
                       s: AsyncSession = Depends(get_session)):
+    require_local_auth()
     if user_id == u.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能删除自己")
     tu = await s.get(User, user_id)
@@ -170,6 +174,7 @@ async def unbind_dingtalk(user_id: uuid.UUID, request: Request,
                           u: User = Depends(require_role("super_admin", "admin")),
                           s: AsyncSession = Depends(get_session)):
     """解绑钉钉（换岗/离职）：保留本地账号与密码登录能力，清除钉钉权限映射。"""
+    require_local_auth()
     tu = await s.get(User, user_id)
     if not tu:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
@@ -197,6 +202,7 @@ class ApiKeyIn(BaseModel):
 @router.post("/auth/api-keys")
 async def create_key(body: ApiKeyIn, u: User = Depends(get_current_user),
                      s: AsyncSession = Depends(get_session)):
+    require_local_auth()
     raw = "kb_" + secrets.token_hex(24)
     k = ApiKey(user_id=u.id, name=body.name, key_hash=hashlib.sha256(raw.encode()).hexdigest(),
                key_prefix=raw[:10])
@@ -228,3 +234,13 @@ async def delete_key(key_id: uuid.UUID, u: User = Depends(get_current_user),
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权删除他人 Key")
     await s.delete(k); await s.commit()
     return {"ok": True}
+
+
+@router.get("/auth/account-management")
+async def account_management(u: User = Depends(get_current_user)):
+    cfg = oidc_config()
+    if not enabled():
+        return {"provider": "local", "account_url": "/settings/account",
+                "admin_url": "/admin/users" if u.role in ("super_admin", "admin") else None}
+    return {"provider": "keycloak", "account_url": cfg["account_url"],
+            "admin_url": cfg["admin_url"] if u.role in ("super_admin", "admin") else None}

@@ -1,0 +1,8 @@
+services:
+  jack-portal:
+    build: .
+    ports:
+      - "3200:80"
+    environment:
+      PORTAL_API_TARGET: ${PORTAL_API_TARGET:-http://10.10.166.2:8080}
+    restart: unless-stopped

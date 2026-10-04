@@ -3,11 +3,15 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getAgentConfig, updateAgentConfig,
-  getPersona, savePersona, getSkill, saveSkill,
+  getPersona, savePersona,
   getAgentTools, listSkills, saveSkillDoc as putSkillDoc, deleteSkillDoc, importSkillDoc,
   type AgentConfig, type AgentTool, type SkillDoc,
 } from '@/api/agent'
 import { listEnabledLlmModels } from '@/api/settings'
+import { listKnowledgeLibraries, type KnowledgeLibrary } from '@/api/knowledge-library'
+import KbPickCard from '@/components/kb/KbPickCard.vue'
+import { KB_TYPE_META, kbTypeLabel, kbTypeMeta } from '@/components/kb/type-meta'
+import { Search } from '@lucide/vue'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -20,6 +24,8 @@ const form = reactive<AgentConfig>({
   models: [],
   default_model: '',
   retrieval_mode: 'smart',
+  knowledge_library_ids: [],
+  knowledge_library_disabled_ids: [],
   greeting_enabled: true,
   greeting: '',
   suggested_questions: [],
@@ -91,6 +97,115 @@ const parsedEmbedUrl = computed(() => {
 // 工具目录（名称/描述来自后端 /agent/tools，开关状态保存于 form.tools_enabled）
 const toolCatalog = ref<AgentTool[]>([])
 
+// ============ 知识库范围选择（智能问答的资源项：未选择=不检索） ============
+// 知识库抽象层全部库（不含物料库）；「添加知识库」弹窗内按类型筛选后勾选
+const kbLibraries = ref<KnowledgeLibrary[]>([])
+const kbLibrariesError = ref('')
+type KbFilterType = 'document' | 'dify' | 'ragflow'
+const KB_FILTERS: Array<{ value: KbFilterType; label: string; match: (l: KnowledgeLibrary) => boolean }> = [
+  { value: 'document', label: KB_TYPE_META.document.label, match: (l) => l.library_type === 'document' },
+  { value: 'dify', label: KB_TYPE_META.dify.label, match: (l) => l.library_type === 'external' && l.platform === 'dify' },
+  { value: 'ragflow', label: KB_TYPE_META.ragflow.label, match: (l) => l.library_type === 'external' && l.platform === 'ragflow' },
+]
+// 弹窗状态：类型筛选（默认文档库）+ 视图（卡片/列表，默认卡片）+ 弹窗内暂存勾选（确认后写回 form）
+const kbDialogVisible = ref(false)
+const kbTypeFilter = ref<KbFilterType>('document')
+const kbView = ref<'card' | 'list'>('card')
+const kbDialogSelection = ref<number[]>([])
+const kbFilterDef = computed(() => KB_FILTERS.find((t) => t.value === kbTypeFilter.value)!)
+const kbKeyword = ref('')
+const kbFilteredLibraries = computed(() => {
+  const kw = kbKeyword.value.trim().toLowerCase()
+  return kbLibraries.value.filter((l) => {
+    if (!kbFilterDef.value.match(l)) return false
+    if (!kw) return true
+    return l.name.toLowerCase().includes(kw) || String(l.dataset_id || '').toLowerCase().includes(kw)
+  })
+})
+// 全选：勾选/取消当前筛选结果中全部可用库（部分选中时为 indeterminate 态，点击补全为全选）
+const kbDialogSelectable = computed(() => kbFilteredLibraries.value.filter((l) => l.enabled))
+const kbSelectAllChecked = computed(() => {
+  const list = kbDialogSelectable.value
+  return list.length > 0 && list.every((l) => kbDialogSelection.value.includes(l.id))
+})
+const kbSelectAllIndeterminate = computed(() => {
+  const list = kbDialogSelectable.value
+  const n = list.filter((l) => kbDialogSelection.value.includes(l.id)).length
+  return n > 0 && n < list.length
+})
+function toggleKbSelectAll() {
+  const list = kbDialogSelectable.value
+  const ids = new Set(kbDialogSelection.value)
+  if (kbSelectAllChecked.value) list.forEach((l) => ids.delete(l.id))
+  else list.forEach((l) => ids.add(l.id))
+  kbDialogSelection.value = [...ids]
+}
+// 已选库详情（跨类型）：折叠项以标签回显类型与名称
+const kbSelectedLibs = computed(() =>
+  kbLibraries.value.filter((l) => form.knowledge_library_ids?.includes(l.id)))
+
+function removeKbSelection(id: number) {
+  if (!form.knowledge_library_ids) return
+  form.knowledge_library_ids = form.knowledge_library_ids.filter((i) => i !== id)
+  // 移除绑定时同步清理停用标记，避免脏数据
+  if (form.knowledge_library_disabled_ids) {
+    form.knowledge_library_disabled_ids = form.knowledge_library_disabled_ids.filter((i) => i !== id)
+  }
+}
+
+/** 智能体级停用标记（仅本地态，点「保存配置」才持久化）：停用的库不参与检索 */
+function isKbDisabled(id: number): boolean {
+  return !!form.knowledge_library_disabled_ids?.includes(id)
+}
+
+function toggleKbEnabled(id: number, enabled: boolean) {
+  if (!form.knowledge_library_disabled_ids) form.knowledge_library_disabled_ids = []
+  const set = new Set(form.knowledge_library_disabled_ids)
+  if (enabled) set.delete(id)
+  else set.add(id)
+  form.knowledge_library_disabled_ids = [...set]
+}
+
+function isKbDialogSelected(id: number): boolean {
+  return kbDialogSelection.value.includes(id)
+}
+
+/** 卡片视图整卡点选：切换弹窗内暂存勾选（停用库不可选） */
+function toggleKbDialogSelection(lib: KnowledgeLibrary) {
+  if (!lib.enabled) return
+  const idx = kbDialogSelection.value.indexOf(lib.id)
+  if (idx >= 0) kbDialogSelection.value.splice(idx, 1)
+  else kbDialogSelection.value.push(lib.id)
+}
+
+function openKbDialog() {
+  // 打开弹窗：类型回到默认文档库、视图回默认卡片，勾选状态以当前配置初始化
+  kbTypeFilter.value = 'document'
+  kbView.value = 'card'
+  kbKeyword.value = ''
+  kbDialogSelection.value = [...(form.knowledge_library_ids || [])]
+  kbDialogVisible.value = true
+}
+
+function confirmKbDialog() {
+  form.knowledge_library_ids = [...kbDialogSelection.value]
+  // 停用标记与最新选区求交：新加入的库默认启用，已移除的库清理标记
+  const ids = new Set(form.knowledge_library_ids)
+  form.knowledge_library_disabled_ids = (form.knowledge_library_disabled_ids || []).filter((i) => ids.has(i))
+  kbDialogVisible.value = false
+}
+
+async function loadKbLibraries() {
+  kbLibrariesError.value = ''
+  try {
+    // 列表接口已排除物料库（素材管理专用，不参与智能问答检索）
+    kbLibraries.value = await listKnowledgeLibraries()
+  } catch (e: any) {
+    kbLibrariesError.value = e?.message || '加载失败'
+    kbLibraries.value = []
+  }
+}
+
 // 仅可选择系统已接入（生效）的模型；is_default 为系统配置里的默认模型
 const modelOptions = ref<Array<{ model: string; profile_id: string; profile_name: string; is_default: boolean }>>([])
 // 智能体生效默认模型：管理员点选的 default_model，未设置时跟随列表首个
@@ -104,6 +219,8 @@ async function load() {
   try {
     const [cfg, toolsRes] = await Promise.all([getAgentConfig(), getAgentTools().catch(() => null)])
     Object.assign(form, cfg)
+    form.knowledge_library_ids = cfg.knowledge_library_ids || []
+    form.knowledge_library_disabled_ids = cfg.knowledge_library_disabled_ids || []
     // 外部智能体配置兜底（旧数据可能缺平台 key）
     const ext = (form.external_agents || {}) as Record<string, Partial<AgentConfig['external_agents']['hiagent']>>
     form.external_agents = {
@@ -145,6 +262,8 @@ async function load() {
   } catch {
     /* 未配置 LLM 时忽略 */
   }
+  // 知识库候选（类型筛选 + 勾选范围）
+  await loadKbLibraries()
 }
 
 async function save() {
@@ -163,32 +282,27 @@ async function save() {
   }
 }
 
-// ============ 人格（SOUL）与技能（SKILL）提示词编辑 ============
+// ============ 人格（SOUL）提示词编辑 ============
 const promptLoading = ref(false)
 const personaSaving = ref(false)
-const skillSaving = ref(false)
 const personaLoaded = ref(false)
-const skillLoaded = ref(false)
 
 const persona = reactive({ content: '', saved: '', custom: false, default: '' })
-const skill = reactive({ content: '', saved: '', custom: false, default: '' })
 
 async function loadPrompts() {
   promptLoading.value = true
   try {
-    const [p, s] = await Promise.all([getPersona(), getSkill()])
+    const p = await getPersona()
     persona.content = p.content; persona.saved = p.content; persona.custom = p.custom; persona.default = p.default
-    skill.content = s.content; skill.saved = s.content; skill.custom = s.custom; skill.default = s.default
     personaLoaded.value = true
-    skillLoaded.value = true
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '人格/技能配置加载失败（请确认 DeerFlow 服务已启动）')
+    ElMessage.error(e?.response?.data?.detail || '人格配置加载失败（请确认 DeerFlow 服务已启动）')
   } finally {
     promptLoading.value = false
   }
 }
 
-// 切到「人格与技能 / 技能库」Tab 时懒加载
+// 切到「人格 / 技能」Tab 时懒加载
 function onTabChange(name: string | number) {
   if (name === 'prompt' && !personaLoaded.value) loadPrompts()
   if (name === 'skills' && !skillsLoaded.value) {
@@ -231,43 +345,9 @@ async function resetPersonaDoc() {
   }
 }
 
-async function saveSkillDoc() {
-  if (!skill.content.trim()) {
-    ElMessage.warning('技能内容不能为空')
-    return
-  }
-  skillSaving.value = true
-  try {
-    const res = await saveSkill({ content: skill.content })
-    skill.saved = skill.content
-    skill.custom = res.custom
-    ElMessage.success('技能已保存，新对话生效')
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '保存失败')
-  } finally {
-    skillSaving.value = false
-  }
-}
-
-async function resetSkillDoc() {
-  try {
-    await ElMessageBox.confirm('确定恢复为默认技能模板？当前自定义内容将被清除。', '恢复默认', { type: 'warning' })
-    skillSaving.value = true
-    const res = await saveSkill({ reset: true })
-    skill.content = skill.default
-    skill.saved = skill.default
-    skill.custom = res.custom
-    ElMessage.success('已恢复默认技能')
-  } catch {
-    /* 用户取消 */
-  } finally {
-    skillSaving.value = false
-  }
-}
-
 onMounted(load)
 
-// ============ 技能库管理（ClawHub/Agent Skills 通用结构） ============
+// ============ 技能管理（ClawHub/Agent Skills 通用结构） ============
 const skills = ref<SkillDoc[]>([])
 const skillsLoading = ref(false)
 const skillsLoaded = ref(false)
@@ -300,9 +380,9 @@ async function loadSkills() {
   skillsLoading.value = true
   try {
     const res = await listSkills()
-    skills.value = (res.skills || []).filter((s) => !s.builtin)
+    skills.value = res.skills || []
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '技能库加载失败（请确认 DeerFlow 服务已启动）')
+    ElMessage.error(e?.response?.data?.detail || '技能加载失败（请确认 DeerFlow 服务已启动）')
   } finally {
     skillsLoading.value = false
   }
@@ -501,7 +581,7 @@ async function onImportFile(e: Event) {
                 <span>{{ m.model }}</span>
                 <span
                   v-if="form.models.includes(m.model)"
-                  :style="{ float: 'right', color: m.model === effectiveDefaultModel ? '#409eff' : '#c0c4cc', fontSize: '12px', cursor: 'pointer' }"
+                  :style="{ float: 'right', color: m.model === effectiveDefaultModel ? 'var(--el-color-primary)' : '#c0c4cc', fontSize: '12px', cursor: 'pointer' }"
                   :title="m.model === effectiveDefaultModel ? '智能体默认模型' : '点击设为智能体默认模型'"
                   @click.stop="form.default_model = m.model"
                 >{{ m.model === effectiveDefaultModel ? '默认' : '设为默认' }}</span>
@@ -523,6 +603,38 @@ async function onImportFile(e: Event) {
             <div class="mode-desc">
               <p><b>强制调用</b>：每个问题（含问候寒暄）都必须先检索知识库再回答（平台注入强制约束），答案严格来自知识库。</p>
               <p><b>智能调用</b>：闲聊问候直接应答；业务问题先检索 Dify 知识库，召回不足时智能体自主补查、再不足兜底钉钉知识库。</p>
+            </div>
+            <div class="kb-selected">
+              <div class="kb-selected-head">
+                <span class="kb-selected-hint">接入的知识库参与智能问答检索，开关可临时停用；变更需点「保存配置」生效</span>
+                <el-button size="small" @click="openKbDialog">添加知识库</el-button>
+              </div>
+              <div v-if="kbSelectedLibs.length" class="kb-lib-grid">
+                <div
+                  v-for="lib in kbSelectedLibs"
+                  :key="lib.id"
+                  class="kb-lib-card"
+                  :class="{ 'is-off': isKbDisabled(lib.id) }"
+                >
+                  <div class="kb-lib-info">
+                    <span class="kb-lib-name" :title="lib.name">{{ lib.name }}</span>
+                    <span
+                      class="kb-lib-type"
+                      :style="isKbDisabled(lib.id) ? undefined : { color: kbTypeMeta(lib).color, background: kbTypeMeta(lib).bg }"
+                    >{{ kbTypeLabel(lib) }}</span>
+                  </div>
+                  <el-switch
+                    size="small"
+                    :model-value="!isKbDisabled(lib.id)"
+                    :aria-label="`${isKbDisabled(lib.id) ? '启用' : '停用'}知识库 ${lib.name}`"
+                    @update:model-value="(v: string | number | boolean) => toggleKbEnabled(lib.id, !!v)"
+                  />
+                  <el-tooltip content="移除知识库" placement="top">
+                    <el-icon class="kb-lib-remove" @click="removeKbSelection(lib.id)"><Close /></el-icon>
+                  </el-tooltip>
+                </div>
+              </div>
+              <div v-else class="kb-empty-hint">未选择知识库，智能问答将不进行知识检索；点「添加知识库」接入</div>
             </div>
           </el-collapse-item>
 
@@ -664,9 +776,9 @@ async function onImportFile(e: Event) {
         </el-collapse>
       </el-tab-pane>
 
-      <!-- ============ 人格与技能（DeerFlow SOUL / SKILL 提示词） ============ -->
-      <el-tab-pane label="人格与技能" name="prompt">
-        <el-alert title="人格（SOUL）与技能（SKILL）即问答智能体（DeerFlow）的系统提示词与工作流指令：保存后在新对话中生效，自定义内容持久化，服务重启不丢失。" type="info" :closable="false" show-icon />
+      <!-- ============ 人格（DeerFlow SOUL 提示词） ============ -->
+      <el-tab-pane label="人格" name="prompt">
+        <el-alert title="人格（SOUL）即问答智能体（DeerFlow）的系统提示词：保存后在新对话中生效，自定义内容持久化，服务重启不丢失。" type="info" :closable="false" show-icon />
         <div v-loading="promptLoading">
           <!-- 人格 SOUL.md -->
           <div class="prompt-card">
@@ -694,44 +806,16 @@ async function onImportFile(e: Event) {
               class="prompt-editor"
             />
           </div>
-
-          <!-- 技能 SKILL.md -->
-          <div class="prompt-card">
-            <div class="prompt-head">
-              <div>
-                <span class="card-title"><span class="card-ico ico-skill">🧰</span> 问答技能 · SKILL.md</span>
-                <el-tag :type="skill.custom ? 'warning' : 'info'" size="small" class="prompt-tag">
-                  {{ skill.custom ? '自定义' : '默认模板' }}
-                </el-tag>
-              </div>
-              <div class="prompt-actions">
-                <el-button size="small" :disabled="skillSaving" @click="resetSkillDoc">恢复默认</el-button>
-                <el-button size="small" type="primary" :loading="skillSaving" :disabled="skill.content === skill.saved" @click="saveSkillDoc">保存</el-button>
-              </div>
-            </div>
-            <p class="prompt-desc">
-              定义「企业知识库问答」技能的工作流指令（DeerFlow Skill）：意图判断、检索策略、
-              作答规范、引用来源等。<strong>头部 frontmatter（name/description/version）需保留</strong>；
-              修改后在问答智能体的新对话中生效，自定义内容持久化。
-            </p>
-            <el-input
-              v-model="skill.content"
-              type="textarea"
-              :rows="16"
-              spellcheck="false"
-              class="prompt-editor"
-            />
-          </div>
         </div>
       </el-tab-pane>
 
-      <!-- ============ 技能库（ClawHub 通用 SKILL.md 结构） ============ -->
-      <el-tab-pane label="技能库" name="skills">
+      <!-- ============ 技能（ClawHub 通用 SKILL.md 结构） ============ -->
+      <el-tab-pane label="技能" name="skills">
         <div class="skill-page" v-loading="skillsLoading">
           <div class="skill-toolbar">
             <div class="skill-toolbar-hint">
               兼容 ClawHub 通用技能结构：每个技能为一个目录 + <code>SKILL.md</code>（含 name/description frontmatter）。
-              问答智能体（DeerFlow）在新对话中按启用状态加载这些技能；内置问答技能在「人格与技能」页签单独维护。
+              问答智能体（DeerFlow）在新对话中按启用状态加载这些技能；问答技能与其他技能统一在此维护。
             </div>
             <div class="skill-toolbar-ops">
               <input
@@ -862,6 +946,77 @@ async function onImportFile(e: Event) {
       <template #footer>
         <el-button @click="skillDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="skillFormSaving" @click="saveSkillForm">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 知识库选择弹窗：类型筛选（默认文档库）+ 卡片/列表两种视图 + 勾选 -->
+    <el-dialog
+      v-model="kbDialogVisible"
+      title="添加知识库"
+      width="876px"
+      class="kb-dialog"
+      :close-on-click-modal="false"
+    >
+      <div class="kb-dialog-bar">
+        <el-radio-group v-model="kbTypeFilter" size="small">
+          <el-radio-button v-for="t in KB_FILTERS" :key="t.value" :value="t.value">{{ t.label }}</el-radio-button>
+        </el-radio-group>
+        <el-radio-group v-model="kbView" size="small">
+          <el-radio-button value="card">卡片</el-radio-button>
+          <el-radio-button value="list">列表</el-radio-button>
+        </el-radio-group>
+        <el-input
+          v-model="kbKeyword"
+          class="kb-dialog-search"
+          placeholder="搜索知识库名称或 ID"
+          clearable
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+        <el-checkbox
+          :model-value="kbSelectAllChecked"
+          :indeterminate="kbSelectAllIndeterminate"
+          class="kb-dialog-selectall"
+          @change="toggleKbSelectAll"
+        >全选</el-checkbox>
+        <span class="kb-dialog-count">已选 {{ kbDialogSelection.length }} 个</span>
+      </div>
+      <div class="kb-dialog-body">
+        <div v-if="kbLibrariesError" class="kb-scope-empty">知识库加载失败：{{ kbLibrariesError }}</div>
+        <template v-else>
+          <!-- 卡片视图：一行 3 卡（公共组件 KbPickCard），整卡点选 -->
+          <div v-if="kbView === 'card'" class="kb-card-grid">
+            <KbPickCard
+              v-for="(lib, idx) in kbFilteredLibraries"
+              :key="lib.id"
+              :lib="lib"
+              :selected="isKbDialogSelected(lib.id)"
+              :style="{ animationDelay: (Math.min(idx, 11) * 30) + 'ms' }"
+              @toggle="toggleKbDialogSelection(lib)"
+            />
+            <div v-if="!kbFilteredLibraries.length" class="kb-scope-empty">
+              暂无{{ kbFilterDef.label }}，可到「知识应用 → 知识库」创建或登记
+            </div>
+          </div>
+          <!-- 列表视图：单列勾选 -->
+          <template v-else>
+            <el-checkbox-group v-model="kbDialogSelection" class="kb-check-group kb-check-group--list">
+              <el-checkbox v-for="lib in kbFilteredLibraries" :key="lib.id" :value="lib.id" :disabled="!lib.enabled">
+                {{ lib.name }}
+                <el-tag v-if="!lib.enabled" type="info" size="small" class="kb-lib-tag">停用</el-tag>
+              </el-checkbox>
+            </el-checkbox-group>
+            <div v-if="!kbFilteredLibraries.length" class="kb-scope-empty">
+              暂无{{ kbFilterDef.label }}，可到「知识应用 → 知识库」创建或登记
+            </div>
+          </template>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="kbDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmKbDialog">确定</el-button>
       </template>
     </el-dialog>
   </div>
@@ -1018,7 +1173,7 @@ async function onImportFile(e: Event) {
 .ico-follow { background: #fff4e0; }
 .ico-plan { background: #eef0ff; }
 .ico-mem { background: #f0e8ff; }
-.ico-hyper { background: #e8f6ff; font-weight: 700; font-size: 13px; color: #2b6bff; }
+.ico-hyper { background: var(--app-blue-50); font-weight: 700; font-size: 13px; color: var(--app-brand-blue); }
 .card-hint {
   font-size: 12px;
   font-weight: 400;
@@ -1030,6 +1185,167 @@ async function onImportFile(e: Event) {
 }
 .mode-radio {
   margin-left: 14px;
+}
+/* —— 知识库检索范围 —— */
+.kb-help-icon {
+  margin-left: 6px;
+  color: #909399;
+  font-size: 15px;
+  cursor: help;
+}
+.kb-selected-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.kb-selected-hint {
+  font-size: 12.5px;
+  color: #909399;
+}
+/* 已接入知识库：等大卡片（264×52），一行自适应多列 */
+.kb-lib-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 264px);
+  gap: 10px;
+}
+.kb-lib-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 12px;
+  border: 1px solid #eef0f4;
+  border-radius: 8px;
+  background: #fff;
+  transition: border-color 0.15s, opacity 0.15s;
+}
+.kb-lib-card:hover {
+  border-color: #d6ddf5;
+}
+.kb-lib-card.is-off {
+  background: #fafbfc;
+}
+.kb-lib-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.kb-lib-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kb-lib-card.is-off .kb-lib-name {
+  color: #909399;
+}
+.kb-lib-type {
+  flex-shrink: 0;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  line-height: 1;
+  color: #909399;
+  background: #f4f4f5;
+}
+.kb-lib-remove {
+  flex-shrink: 0;
+  cursor: pointer;
+  color: #c0c4cc;
+  font-size: 14px;
+  transition: color 0.15s;
+}
+.kb-lib-remove:hover {
+  color: #f56c6c;
+}
+.kb-empty-hint {
+  font-size: 12.5px;
+  color: #909399;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px dashed #dcdfe6;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+/* —— 知识库选择弹窗 —— */
+.kb-dialog-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.kb-dialog-search {
+  width: 240px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.kb-dialog-selectall {
+  flex-shrink: 0;
+}
+.kb-dialog-count {
+  font-size: 12.5px;
+  color: #909399;
+  flex-shrink: 0;
+}
+/* 内容区固定高度（3 行卡片 + 露出下一行边缘提示可滚动）；两种视图同高防跳动 */
+.kb-dialog-body {
+  height: 556px;
+  overflow-y: auto;
+  margin-top: 14px;
+}
+/* 卡片视图：一行 3 卡（876px 弹窗 - 32px 内边距 - 28px 间距 = 每卡 272px 宽 × 148px 高）；
+   minmax(0,1fr) 防长内容撑爆列宽，各卡宽度严格一致；卡片样式在公共组件 KbPickCard 内维护 */
+.kb-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-content: start;
+}
+.kb-check-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 18px;
+}
+.kb-check-group--list {
+  grid-template-columns: 1fr;
+}
+.kb-check-group :deep(.el-checkbox) {
+  height: auto;
+  min-height: 28px;
+  align-items: center;
+  margin-right: 0;
+  width: 100%;
+}
+.kb-check-group :deep(.el-checkbox__label) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kb-lib-tag {
+  flex-shrink: 0;
+}
+.kb-scope-empty {
+  padding: 14px 16px;
+  font-size: 12.5px;
+  color: #909399;
+  background: #fff;
+  border: 1px dashed #dcdfe6;
+  border-radius: 8px;
+  line-height: 1.7;
 }
 .mode-desc {
   color: #606266;
@@ -1054,7 +1370,7 @@ async function onImportFile(e: Event) {
   place-items: center;
   font-size: 28px;
   color: #fff;
-  background: linear-gradient(135deg, #409EFF 0%, #79bbff 100%);
+  background: linear-gradient(135deg, var(--el-color-primary) 0%, var(--el-color-primary-light-5) 100%);
   overflow: hidden;
 }
 .avatar-preview img {
@@ -1094,11 +1410,11 @@ async function onImportFile(e: Event) {
   margin-bottom: 8px;
 }
 .hyper-label b {
-  color: #2b6bff;
+  color: var(--app-brand-blue);
   margin-left: 6px;
 }
 
-/* 人格与技能提示词编辑 */
+/* 人格提示词编辑 */
 .prompt-card {
   background: #f7f8fa;
   border: 1px solid #eef0f4;
@@ -1132,7 +1448,6 @@ async function onImportFile(e: Event) {
   line-height: 1.75 !important;
 }
 .ico-soul { background: #f3e8ff; }
-.ico-skill { background: #e0f7f0; }
 .ico-tool { background: #eef0ff; }
 
 /* ===== 工具组 ===== */
@@ -1171,7 +1486,7 @@ async function onImportFile(e: Event) {
   line-height: 1.5;
 }
 
-/* ===== 技能库 ===== */
+/* ===== 技能 ===== */
 .skill-page {
   display: flex;
   flex-direction: column;
@@ -1194,7 +1509,7 @@ async function onImportFile(e: Event) {
   background: #f0f2f8;
   padding: 1px 5px;
   border-radius: 4px;
-  color: #2b6bff;
+  color: var(--app-brand-blue);
 }
 .skill-toolbar-ops {
   display: flex;
@@ -1246,5 +1561,24 @@ async function onImportFile(e: Event) {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+</style>
+
+<style>
+/* 知识库说明 tooltip（popper 挂载于 body，需非 scoped 样式） */
+.kb-help-popper {
+  max-width: 340px;
+}
+.kb-help-popper p {
+  margin: 4px 0;
+  line-height: 1.7;
+}
+/* 添加知识库弹窗（el-dialog 挂载于 body，需非 scoped 样式）：
+   内边距归一化，使 3 列卡片网格（3×272 + 2×14 gap）在 876px 弹窗内刚好铺满 */
+.kb-dialog.el-dialog {
+  padding: 16px;
+}
+.kb-dialog .el-dialog__body {
+  padding: 4px 16px 0;
 }
 </style>

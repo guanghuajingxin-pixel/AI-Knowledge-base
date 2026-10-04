@@ -1,6 +1,6 @@
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from app.qa_events import AnswerProjection, current_question
+from app.qa_events import AnswerProjection
 
 
 def test_summary_and_nested_nodes_cannot_publish_answers():
@@ -45,12 +45,6 @@ def test_generated_notes_are_rejected_instead_of_silently_stripped():
         p.finish(str)
 
 
-def test_new_question_scope_and_resume_are_distinct():
-    assert '不继续回答上一轮问题' in current_question('分级标准是什么', '')
-    assert current_question('先基于已有资料回答', 'stop') == '先基于已有资料回答'
-    assert current_question('继续探索', 'continue') == '继续探索'
-
-
 def test_real_langgraph_summary_two_turns():
     """使用真实 LangGraph/Middleware/检查点，复现摘要与主回答同时生成。"""
     from langchain.agents import create_agent
@@ -80,7 +74,7 @@ def test_real_langgraph_summary_two_turns():
     def run(question):
         p = AnswerProjection('regression')
         events = []
-        for mode, chunk in graph.stream({'messages': [HumanMessage(content=current_question(question, ''))]}, config=config,
+        for mode, chunk in graph.stream({'messages': [HumanMessage(content=question)]}, config=config,
                                          stream_mode=['values', 'updates', 'messages']):
             events.extend(p.feed(mode, chunk))
         return p.finish(str), events

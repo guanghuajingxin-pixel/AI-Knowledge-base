@@ -151,5 +151,82 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hits[0]['score'], hits[1]['score'])
 
 
+class RerankProfileResolutionTests(unittest.IsolatedAsyncioTestCase):
+    """rerank_hits：仅已生效模型可用；历史引用停用模型时回退；大批量分批合并。"""
+
+    def _session(self, specified=None, enabled=None):
+        session = AsyncMock()
+        session.get = AsyncMock(return_value=specified)
+        result = Mock()
+        result.scalar_one_or_none = Mock(return_value=enabled)
+        session.execute = AsyncMock(return_value=result)
+        return session
+
+    def _client(self, payloads):
+        import httpx
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.post = AsyncMock(side_effect=[
+            httpx.Response(200, json=p, request=httpx.Request('POST', 'http://x/v1/rerank'))
+            for p in payloads])
+        return client
+
+    def _hits(self, n):
+        return [{'matched_content': f'合同审批流程第{i}条相关规定', 'score': .5,
+                 'token_similarity': .1, 'document_title': '', 'important_keywords': []}
+                for i in range(n)]
+
+    async def test_disabled_profile_falls_back_to_enabled(self):
+        disabled = NS(id=uuid4(), enabled=False, api_url='http://disabled/rerank', api_key='', model='old')
+        enabled = NS(id=uuid4(), name='enabled-profile', enabled=True,
+                     api_url='http://enabled/rerank', api_key='k', model='new')
+        session = self._session(disabled, enabled)
+        client = self._client([{'results': [
+            {'index': 0, 'relevance_score': .9}, {'index': 1, 'relevance_score': .1}]}])
+        with patch.object(retrieval, 'config', AsyncMock(return_value={'api_url': '', 'api_key': '', 'model': ''})), \
+             patch.object(retrieval.httpx, 'AsyncClient', return_value=client):
+            await retrieval.rerank_hits(session, '合同审批', self._hits(2), str(disabled.id))
+        self.assertEqual(client.post.call_args.args[0], 'http://enabled/rerank')
+        self.assertEqual(client.post.call_args.kwargs['json']['model'], 'new')
+        self.assertEqual(client.post.call_args.kwargs['headers']['Authorization'], 'Bearer k')
+
+    async def test_rerank_batches_and_remaps_indices(self):
+        session = self._session(None, None)
+        p1 = {'results': [{'index': i, 'relevance_score': .5} for i in range(32)]}
+        p2 = {'results': [{'index': 0, 'relevance_score': .8}]}
+        client = self._client([p1, p2])
+        hits = self._hits(33)
+        with patch.object(retrieval, 'config', AsyncMock(
+                return_value={'api_url': 'http://e/rerank', 'api_key': '', 'model': 'm'})), \
+             patch.object(retrieval.httpx, 'AsyncClient', return_value=client):
+            await retrieval.rerank_hits(session, '合同审批', hits, None)
+        self.assertEqual(client.post.await_count, 2)
+        self.assertEqual(len(client.post.call_args.kwargs['json']['documents']), 1)
+        self.assertEqual(client.post.call_args.kwargs['json']['top_n'], 1)
+        self.assertAlmostEqual(hits[-1]['rerank_score'], .8)
+
+    async def test_specified_missing_without_enabled_raises(self):
+        session = self._session(None, None)
+        with patch.object(retrieval, 'config', AsyncMock(
+                return_value={'api_url': '', 'api_key': '', 'model': ''})):
+            with self.assertRaisesRegex(ValueError, '未生效'):
+                await retrieval.rerank_hits(session, '合同审批', self._hits(2), str(uuid4()))
+
+    async def test_long_document_truncated_for_rerank(self):
+        """超长分段（超过模型上下文）发送前截断，原始 hit 内容不变。"""
+        session = self._session(None, None)
+        client = self._client([{'results': [
+            {'index': 0, 'relevance_score': .9}, {'index': 1, 'relevance_score': .1}]}])
+        hits = self._hits(2)
+        hits[0]['matched_content'] = '超长制度条款' * 3000  # 18000 字符，超过 8192 token
+        with patch.object(retrieval, 'config', AsyncMock(
+                return_value={'api_url': 'http://e/rerank', 'api_key': '', 'model': 'm'})), \
+             patch.object(retrieval.httpx, 'AsyncClient', return_value=client):
+            await retrieval.rerank_hits(session, '合同审批', hits, None)
+        docs = client.post.call_args.kwargs['json']['documents']
+        self.assertEqual(len(docs[0]), retrieval._RERANK_MAX_DOC_CHARS)
+        self.assertEqual(len(hits[0]['matched_content']), 18000)
+
+
 if __name__ == '__main__':
     unittest.main()

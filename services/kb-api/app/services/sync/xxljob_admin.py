@@ -200,16 +200,33 @@ class XxlJobAdminClient:
                 return row
         return None
 
+    def find_job_by_handler(self, executor_handler: str) -> dict | None:
+        """按 executorHandler 查找作业（全局批处理作业幂等注册用，作业 ID 不落库）。"""
+        page = self._post("/jobinfo/pageList", {"start": 0, "length": 500, "jobGroup": 0,
+                                                 "triggerStatus": -1, "jobDesc": "",
+                                                 "executorHandler": executor_handler, "author": ""})
+        for row in self._rows(page):
+            if row.get("executorHandler") == executor_handler:
+                return row
+        return None
+
     def add_job(self, spec: dict) -> int:
-        # 创建接口按版本探测：3.x 为 /jobinfo/insert，2.x 为 /jobinfo/add
+        # 创建接口按版本探测：3.x 为 /jobinfo/insert，2.x 为 /jobinfo/add。
+        # 注意：3.x 路径在 2.4.x 上返回 404 JSON（无 code 字段），不能视为成功载荷，
+        # 否则误判后不再尝试 /jobinfo/add（content/data 均为 None 导致误报「创建作业失败: None」）。
         result: dict | None = None
         last_exc: XxlJobAdminError | None = None
         for path in ("/jobinfo/insert", "/jobinfo/add"):
             try:
-                result = self._post(path, spec)
-                break
+                payload = self._post(path, spec)
             except XxlJobAdminError as exc:
                 last_exc = exc
+                continue
+            if isinstance(payload, dict) and payload.get("code") == 200 \
+                    and (payload.get("content") is not None or payload.get("data") is not None):
+                result = payload
+                break
+            last_exc = XxlJobAdminError(f"创建作业失败（{path} 未返回作业 ID）: {payload}")
         if result is None:
             raise last_exc or XxlJobAdminError("创建作业失败")
         # 2.x 返回 content=<id>；3.x 返回 data=<id>（dict/list 为异常载荷，忽略）

@@ -35,6 +35,6 @@ const info = computed<[string, string]>(() => map[props.status] || ['off', props
 .sync-pill.ok { color: #67c23a; border-color: #b3e19d; background: #f0f9eb; }
 .sync-pill.err { color: #f56c6c; border-color: #fab6b6; background: #fef0f0; }
 .sync-pill.warn { color: #e6a23c; border-color: #f5dab1; background: #fdf6ec; }
-.sync-pill.run { color: #409eff; border-color: #a0cfff; background: #ecf5ff; }
+.sync-pill.run { color: var(--el-color-primary); border-color: var(--el-color-primary-light-5); background: var(--el-color-primary-light-9); }
 .sync-pill.off { color: #909399; border-color: #d3d4d6; background: #f4f4f5; }
 </style>

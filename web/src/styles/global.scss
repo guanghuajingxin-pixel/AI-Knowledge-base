@@ -17,14 +17,33 @@ body {
 /*
  * Element Plus 2.x 主题变量覆盖（CSS 自定义属性）
  *
- * Task 1 在 styles/variables.scss 中以 SCSS 变量 ($--color-primary 等) 形式声明了
- * 主题色，但 Element Plus 2.x 已改用 CSS 自定义属性 (--el-color-primary 等)，
- * SCSS 变量无法覆盖 EP 运行时主题。此处显式声明 CSS 变量以使参考截图配色生效。
- * 对照 CLAUDE.md「Color Palette」与「Layout Pattern」中的取值。
+ * EP 的 dist/index.css 与按需自动引入的 theme-chalk/base.css 都在 :root 上声明
+ * --el-color-* 且可能晚于本文件注入，同特异性时后写者胜。因此这里用 :root:root
+ * 提升特异性（(0,2,0) > (0,1,0)），保证品牌 Token 覆盖稳定生效、与加载顺序无关。
+ * 规范见 docs/frontend-dev-spec.md §3。
  */
-:root {
-  --el-color-primary: #409EFF;
-  --el-color-primary-light-9: #ecf5ff;
+:root:root {
+  /* 品牌蓝 Token(基准 #2B6BFF;色阶为向白/黑混合计算值,可复核;规范见 docs/frontend-dev-spec.md §3.2) */
+  --app-blue-50: #eef3ff;
+  --app-blue-100: #dde7ff;
+  --app-blue-200: #bfd3ff;
+  --app-blue-300: #a0bcff;
+  --app-blue-400: #80a6ff;
+  --app-blue-500: #6090ff;
+  --app-brand-blue: #2b6bff;
+  --app-blue-600: #2760e6;
+  --app-blue-700: #2256cc;
+  --app-blue-800: #1e4bb3;
+  --app-blue-900: #1a4099;
+
+  /* Element Plus 主色收敛到品牌蓝(#2B6BFF),light 系列与色阶一一对应 */
+  --el-color-primary: #2b6bff;
+  --el-color-primary-light-3: #6090ff;
+  --el-color-primary-light-5: #80a6ff;
+  --el-color-primary-light-7: #bfd3ff;
+  --el-color-primary-light-8: #dde7ff;
+  --el-color-primary-light-9: #eef3ff;
+  --el-color-primary-dark-2: #2256cc;
   --el-color-success: #67c23a;
   --el-color-warning: #e6a23c;
   --el-color-danger: #f56c6c;

@@ -61,7 +61,7 @@ onBeforeUnmount(() => { if (src.value) URL.revokeObjectURL(src.value) })
 .preview { height: 280px; display: flex; align-items: center; justify-content: center; background: #f5f7fa; border-radius: 6px; overflow: hidden; }
 .image-wrap { position: relative; display: inline-flex; max-width: 100%; max-height: 100%; cursor: crosshair; touch-action: none; user-select: none; }
 img { max-width: 100%; max-height: 280px; object-fit: contain; pointer-events: none; }
-.selection { position: absolute; border: 2px solid var(--el-color-primary); background: #409eff22; pointer-events: none; box-sizing: border-box; }
+.selection { position: absolute; border: 2px solid var(--el-color-primary); background: color-mix(in srgb, var(--el-color-primary) 13%, transparent); pointer-events: none; box-sizing: border-box; }
 .actions { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
 .actions .el-button + .el-button { margin-left: 0; }
 </style>

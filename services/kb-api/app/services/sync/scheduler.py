@@ -78,8 +78,22 @@ def _job_spec(group_id: int, source: SyncSource) -> dict:
     }
 
 
+def _source_backend_type(source_id: int) -> str:
+    """查询同步源 backend_type（查询失败返回空串，走默认直跑分支）。"""
+    try:
+        with SyncSessionLocal() as db:
+            source = db.get(SyncSource, source_id)
+            return (source.backend_type or "").strip().lower() if source else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _handle_sync_source(param: str, job_log) -> tuple[int, str]:
-    """xxl-job handler：param 为同步源 ID（cron 触发）或 JSON（手动触发携带 operator/trigger）。"""
+    """xxl-job handler：param 为同步源 ID（cron 触发）或 JSON（手动触发携带 operator/trigger）。
+
+    library 源分流到编目（run_catalog：预建任务/文档，由 syncBatch 批处理分批消费）；
+    dify/ragflow 源维持整源直跑（run_sync）。
+    """
     source_id: int | None = None
     operator = ""
     trigger = "schedule"
@@ -97,13 +111,23 @@ def _handle_sync_source(param: str, job_log) -> tuple[int, str]:
                 return 500, f"无效的作业参数（应为同步源 ID 或 JSON）: {param!r}"
     if source_id is None:
         return 500, f"无效的作业参数（应为同步源 ID 或 JSON）: {param!r}"
-    summary = run_sync(source_id, trigger, operator)
+    if _source_backend_type(source_id) == "library":
+        from .catalog import run_catalog
+        summary = run_catalog(source_id, trigger, operator)
+    else:
+        summary = run_sync(source_id, trigger, operator)
     job_log.log(f"同步结果: {summary}")
     status = summary.get("status")
     message = str(summary.get("message") or status)[:400]
     if status in ("success", "partial", "skipped"):
         return 200, message
     return 500, message
+
+
+def _handle_sync_batch(param: str, job_log) -> tuple[int, str]:
+    """xxl-job handler：全局批处理 tick（library 编目任务分批消费，param 未用）。"""
+    from .batch import run_sync_batch_tick
+    return run_sync_batch_tick(job_log)
 
 
 def _apply_source_job(admin: XxlJobAdminClient, group_id: int, source: SyncSource) -> int | None:
@@ -154,7 +178,87 @@ def sync_all_jobs() -> int:
             if _apply_source_job(admin, group_id, source) is not None:
                 active += 1
         db.commit()
+    # 全局批处理作业（library 分批同步消费）一并幂等对齐
+    _apply_batch_job(admin, group_id)
     return active
+
+
+def _batch_schedule_conf() -> str:
+    """批处理调度表达式：兼容 5 段 crontab（自动转 Quartz）与 Quartz 6 段（含秒位）。"""
+    raw = (get_settings().sync_batch_cron or "").strip()
+    if len(raw.split()) == 5:
+        return crontab_to_quartz(raw)
+    return raw
+
+
+def _batch_job_spec(group_id: int) -> dict:
+    return {
+        "jobGroup": group_id,
+        "jobDesc": "知识同步批处理（全局）",
+        "author": "kge",
+        "alarmEmail": "",
+        "scheduleType": "CRON",
+        "scheduleConf": _batch_schedule_conf(),
+        "glueType": "BEAN",
+        "executorHandler": "syncBatch",
+        "executorParam": "",
+        "executorRouteStrategy": "FIRST",
+        "childJobId": "",
+        "misfireStrategy": "DO_NOTHING",
+        # 单批可能超过 tick 间隔（大文件下载/解析提交）：丢弃堆积触发，靠 idleBeat 回报 busy
+        "executorBlockStrategy": "DISCARD_LATER",
+        "executorTimeout": 0,
+        "executorFailRetryCount": 0,
+        "glueRemark": "GLUE代码初始化描述",
+    }
+
+
+_batch_job_id: int | None = None
+
+
+def _apply_batch_job(admin: XxlJobAdminClient, group_id: int) -> int | None:
+    """幂等注册/启动全局批处理作业（按 executorHandler 查找，作业 ID 不落库）。"""
+    global _batch_job_id
+    spec = _batch_job_spec(group_id)
+    try:
+        if _batch_job_id:
+            try:
+                admin.update_job({**spec, "id": _batch_job_id})
+                admin.start_job(_batch_job_id)
+                return _batch_job_id
+            except XxlJobAdminError:
+                logger.warning("批处理作业 %s 更新失败，按 handler 重新查找", _batch_job_id)
+                _batch_job_id = None
+        row = admin.find_job_by_handler("syncBatch")
+        if row is not None:
+            _batch_job_id = int(row["id"])
+            admin.update_job({**spec, "id": _batch_job_id})
+        else:
+            _batch_job_id = admin.add_job(spec)
+        admin.start_job(_batch_job_id)
+        return _batch_job_id
+    except XxlJobAdminError as exc:
+        logger.error("批处理作业注册失败: %s", exc)
+        _batch_job_id = None
+        return None
+
+
+def ensure_batch_job_running() -> int | None:
+    """确保批处理作业已在 admin 注册并启动（编目触发批处理前调用）。"""
+    if not get_settings().xxl_job_enabled:
+        return None
+    return _apply_batch_job(get_admin_client(), _ensure_group())
+
+
+def trigger_batch_once() -> None:
+    """立即触发一轮批处理（编目完成后调用，不等下一个 tick；best effort）。"""
+    if not get_settings().xxl_job_enabled:
+        from .batch import run_sync_batch_tick
+        _direct_executor.submit(run_sync_batch_tick)
+        return
+    job_id = _batch_job_id or ensure_batch_job_running()
+    if job_id:
+        get_admin_client().trigger_job(job_id)
 
 
 def trigger_source_sync(source_id: int, operator: str = "") -> dict:
@@ -165,8 +269,13 @@ def trigger_source_sync(source_id: int, operator: str = "") -> dict:
     调度关闭（XXL_JOB_ENABLED=false）时回退进程内直跑，保证开发环境可用。
     """
     if not get_settings().xxl_job_enabled:
-        from .engine import run_sync as direct_run
-        _direct_executor.submit(direct_run, source_id, "manual", operator)
+        # library 源降级也走编目（run_catalog 内部会触发进程内批处理线程）
+        if _source_backend_type(source_id) == "library":
+            from .catalog import run_catalog
+            _direct_executor.submit(run_catalog, source_id, "manual", operator)
+        else:
+            from .engine import run_sync as direct_run
+            _direct_executor.submit(direct_run, source_id, "manual", operator)
         return {"via": "direct",
                 "message": "调度中心未启用（XXL_JOB_ENABLED=false），本次直接执行；进度可在同步队列查看"}
     admin = get_admin_client()
@@ -193,8 +302,14 @@ def trigger_first_sync(source_id: int, operator: str = "") -> None:
 
     用户预期「创建后立即开始同步」，而 admin→执行器回调存在间歇性失败
     （开发态热重载窗口/网络抖动），首次同步不走调度往返、直跑最可靠；
-    后续周期同步仍由 cron（XXL-Job）驱动。run_sync 自带文件锁防并发。
+    后续周期同步仍由 cron（XXL-Job）驱动。
+    library 源直跑的是编目（预建任务/文档，立即入队进列表），实际内容
+    由 syncBatch 批处理作业分批同步。
     """
+    if _source_backend_type(source_id) == "library":
+        from .catalog import run_catalog
+        _direct_executor.submit(run_catalog, source_id, "manual", operator)
+        return
     from .engine import run_sync as direct_run
     _direct_executor.submit(direct_run, source_id, "manual", operator)
 
@@ -234,6 +349,32 @@ def _start_recovery_thread() -> None:
     _recovery_thread.start()
 
 
+# 降级批处理轮询：XXL_JOB_ENABLED=false / admin 不可达时由进程内线程兜底消费队列，
+# 间隔与默认批处理 cron（每 30s）对齐。
+_BATCH_FALLBACK_INTERVAL_SECONDS = 30
+_batch_fallback_stop = threading.Event()
+_batch_fallback_thread: threading.Thread | None = None
+
+
+def _batch_fallback_loop() -> None:
+    from .batch import run_sync_batch_tick
+    while not _batch_fallback_stop.wait(_BATCH_FALLBACK_INTERVAL_SECONDS):
+        try:
+            run_sync_batch_tick()
+        except Exception:  # noqa: BLE001
+            logger.exception("降级批处理 tick 失败")
+
+
+def _start_batch_fallback_thread() -> None:
+    global _batch_fallback_thread
+    if _batch_fallback_thread is not None and _batch_fallback_thread.is_alive():
+        return
+    _batch_fallback_stop.clear()
+    _batch_fallback_thread = threading.Thread(target=_batch_fallback_loop,
+                                              name="sync-batch-fallback", daemon=True)
+    _batch_fallback_thread.start()
+
+
 def start_sync_scheduler() -> int:
     """FastAPI 启动时调用。
 
@@ -246,14 +387,18 @@ def start_sync_scheduler() -> int:
     _start_recovery_thread()
     if not s.xxl_job_enabled:
         logger.warning("XXL-Job 调度已禁用（XXL_JOB_ENABLED=false）："
-                       "cron 定时同步不运行，手动同步/同步队列/重试不受影响")
+                       "cron 定时同步不运行，手动同步/同步队列/重试不受影响；"
+                       "批处理由进程内降级线程消费")
+        _start_batch_fallback_thread()
         return 0
     admin = get_admin_client()
     try:
         admin.ping()
     except Exception as exc:  # noqa: BLE001 — 调度器缺席不能拖死 API 服务
         logger.error("XXL-Job admin 不可达（%s），本次启动跳过定时调度：cron 同步不运行，"
-                     "手动同步/同步队列/重试不受影响。恢复 admin 后重启 kb-api 即可恢复调度", exc)
+                     "手动同步/同步队列/重试不受影响；批处理由进程内降级线程消费。"
+                     "恢复 admin 后重启 kb-api 即可恢复调度", exc)
+        _start_batch_fallback_thread()
         return 0
     global _executor
     ip = s.xxl_job_executor_ip or detect_ip(s.xxl_job_admin_url)
@@ -262,15 +407,16 @@ def start_sync_scheduler() -> int:
     _executor = XxlJobExecutor(s.xxl_job_admin_url, s.xxl_job_access_token,
                                s.xxl_job_executor_appname, ip, s.xxl_job_executor_port,
                                log_path)
-    _executor.start({"syncSource": _handle_sync_source})
+    _executor.start({"syncSource": _handle_sync_source, "syncBatch": _handle_sync_batch})
     count = sync_all_jobs()
-    logger.info("XXL-Job 调度已启动：执行器 http://%s:%s，启用作业 %s 个",
+    logger.info("XXL-Job 调度已启动：执行器 http://%s:%s，启用作业 %s 个（含批处理作业）",
                 ip, s.xxl_job_executor_port, count)
     return count
 
 
 def shutdown_sync_scheduler() -> None:
     _recovery_stop.set()
+    _batch_fallback_stop.set()
     global _executor
     if _executor is not None:
         _executor.stop()

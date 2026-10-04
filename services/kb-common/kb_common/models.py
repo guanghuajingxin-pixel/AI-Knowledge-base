@@ -20,6 +20,19 @@ class User(Base):
     # 最近一次「用户自主设置/修改」密码的时间；null 表示从未设过可用密码
     password_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+class UserIdentity(Base):
+    """Stable OIDC subject -> existing business user; never auto-link by username/email."""
+    __tablename__ = "user_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject", name="uq_user_identity_subject"),
+        UniqueConstraint("issuer", "user_id", name="uq_user_identity_user"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    issuer: Mapped[str] = mapped_column(String(500))
+    subject: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -604,6 +617,9 @@ class SyncTask(Base):
     retry_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # library 批处理模式：预建的 LibraryDocument.id（UUID 字符串）；
+    # 亦是批处理认领条件（dify/ragflow 直跑任务不携带此列）。
+    library_document_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -731,6 +747,13 @@ class LibraryDocument(Base):
     # 文档级索引设置覆盖：{processing, strategy, enhancements, type_rules}；缺省回退库级 engine_config
     engine_config: Mapped[dict] = mapped_column(JSON, default=dict, server_default='{}', nullable=False)
     source: Mapped[str] = mapped_column(String(32), default="local", server_default="local")
+    # 钉钉来源固化信息（入库时快照，避免知识中心列表多跳 join）：
+    # source_url=钉钉在线文档链接；source_workspace_name=钉钉知识库名称
+    source_url: Mapped[str | None] = mapped_column(String(500))
+    source_workspace_name: Mapped[str | None] = mapped_column(String(200))
+    # 知识中心字段：更新人（手动上传=操作用户，钉钉同步=同步触发人）、过期时间
+    updated_by: Mapped[str | None] = mapped_column(String(100))
+    expire_at: Mapped[datetime | None] = mapped_column(DateTime)
     # 训练/解析完成时间（COMPLETED 时写入）
     parsed_at: Mapped[datetime | None] = mapped_column(DateTime)
     tags: Mapped[list] = mapped_column(ARRAY(String(64)), default=list)

@@ -68,6 +68,7 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
     dataset_ids = ctx.get("dataset_ids") or []
     ragflow_dataset_ids = ctx.get("ragflow_dataset_ids") or []
     kb_ids = ctx.get("kb_ids") or []
+    doc_library_ids = ctx.get("doc_library_ids") or []
     effective_top_k = min(max(int(top_k or 8), 1), 15)
 
     from deerflow.agents.middlewares.exploration_timeout_middleware import ExplorationTimeoutMiddleware
@@ -91,6 +92,7 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
         "dataset_ids": dataset_ids,
         "ragflow_dataset_ids": ragflow_dataset_ids,
         "kb_ids": kb_ids,
+        "doc_library_ids": doc_library_ids,
         "top_k": effective_top_k,
         # 问答线程 ID：kb-api 据此回溯用户身份，执行检索返回脱敏策略
         "thread_id": thread_id,
@@ -147,8 +149,7 @@ def knowledge_search_tool(query: str, top_k: int = 8, config: RunnableConfig = N
 def dingtalk_search_tool(query: str, top_k: int = 10, config: RunnableConfig = None) -> str:
     """检索钉钉知识库中的文档，按文件名和目录路径做关键词匹配。
 
-    钉钉知识库是企业知识的两个指定检索来源之一，与 knowledge_search
-    配合。仅在知识库证据不足且用户点击继续从钉钉知识库探索后调用。
+    钉钉知识库与 knowledge_search 配合，作为企业知识的检索来源之一。
     钉钉知识库支持文档、表格、演示文稿等文件类型，按文件名/目录路径关键词匹配
     （非语义检索），返回文件元数据（名称、所属知识库、目录、链接）。
 
@@ -164,12 +165,12 @@ def dingtalk_search_tool(query: str, top_k: int = 10, config: RunnableConfig = N
         query: 检索关键词，多个词以空格分隔。
         top_k: 返回结果数，默认 10。
     """
+    cfg = (config or {}).get("configurable", {}) or {}
+    thread_id = cfg.get("thread_id", "default")
+
     budget = _dingtalk_budget(config)
     if budget <= 0:
         return _blocked()
-
-    cfg = (config or {}).get("configurable", {}) or {}
-    thread_id = cfg.get("thread_id", "default")
 
     payload: dict[str, Any] = {
         "query": query,
@@ -308,6 +309,9 @@ def dingtalk_read_doc_tool(node_id: str, title: str = "", extension: str = "", c
     budget = _dingtalk_budget(config)
     if budget <= 0:
         return _blocked()
+
+    cfg = (config or {}).get("configurable", {}) or {}
+    thread_id = cfg.get("thread_id", "default")
 
     payload: dict[str, Any] = {
         "node_id": node_id,

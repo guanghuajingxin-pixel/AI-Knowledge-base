@@ -1477,7 +1477,7 @@ button.mobile-only { display: none; }
   transition: background .15s;
 }
 .history-item:hover { background: var(--surface-2); }
-.history-item.active { background: color-mix(in srgb, #409EFF 12%, transparent); color: #409EFF; font-weight: 600; }
+.history-item.active { background: color-mix(in srgb, var(--el-color-primary) 12%, transparent); color: var(--el-color-primary); font-weight: 600; }
 .history-name {
   flex: 1 1 auto;
   overflow: hidden;
@@ -1771,7 +1771,7 @@ button.mobile-only { display: none; }
 .cite { display: inline-block; color: var(--ink-2); font-size: 11px; }
 .ref-title { flex: 1; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ref-page { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
-.doc-tag { display: inline-block; background: color-mix(in srgb, #409EFF 10%, #fff); color: #409EFF; border-radius: 4px; padding: 0 6px; font-size: 11px; line-height: 18px; }
+.doc-tag { display: inline-block; background: color-mix(in srgb, var(--el-color-primary) 10%, #fff); color: var(--el-color-primary); border-radius: 4px; padding: 0 6px; font-size: 11px; line-height: 18px; }
 .gap-actions { margin-top: 12px; display: flex; gap: 8px; }
 .cfg-tip { background: #fff7e6; border: 1px solid #ffd591; border-radius: 10px; padding: 12px 14px; }
 .cfg-text { color: #ad6800; white-space: pre-line; line-height: 1.8; }

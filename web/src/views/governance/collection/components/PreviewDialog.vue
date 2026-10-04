@@ -96,7 +96,7 @@ async function confirm() {
   border: 1px solid var(--el-border-color); color: var(--el-text-color-secondary); background: var(--el-fill-color-light);
 }
 .preview-pill.ok { color: #67c23a; border-color: #b3e19d; background: #f0f9eb; }
-.preview-pill.run { color: #409eff; border-color: #a0cfff; background: #ecf5ff; }
+.preview-pill.run { color: var(--el-color-primary); border-color: var(--el-color-primary-light-5); background: var(--el-color-primary-light-9); }
 .preview-pill.warn { color: #e6a23c; border-color: #f5dab1; background: #fdf6ec; }
 .preview-pill.off { color: #909399; border-color: #d3d4d6; background: #f4f4f5; }
 </style>

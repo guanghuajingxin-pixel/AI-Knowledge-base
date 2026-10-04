@@ -238,8 +238,8 @@ async function handleSyncImport() {
       pipeline_inputs: {},
       node_whitelist: sel.nodes.map((n) => n.node_id),
     })
-    // 后端创建源时已直跑首次同步，无需前端二次触发
-    ElMessage.success(`已创建自动同步任务（${sel.nodes.length} 篇文档，每 5 分钟同步）`)
+    // 后端创建源时已直跑首次编目：任务进同步队列、文档以「待同步」进列表，由批处理分批同步
+    ElMessage.success(`已创建自动同步任务（${sel.nodes.length} 篇文档，分批同步中，可在同步队列查看进度）`)
   } else if (kbSelection.value) {
     for (const ws of kbSelection.value.workspaces) {
       await createSource({
@@ -255,9 +255,9 @@ async function handleSyncImport() {
         pipeline_inputs: {},
         node_whitelist: [],
       })
-      // 后端创建源时已直跑首次同步，无需前端二次触发
+      // 后端创建源时已直跑首次编目：任务进同步队列、文档以「待同步」进列表，由批处理分批同步
     }
-    ElMessage.success(`已创建 ${kbSelection.value.workspaces.length} 个自动同步任务（每 5 分钟同步）`)
+    ElMessage.success(`已创建 ${kbSelection.value.workspaces.length} 个自动同步任务（文档将分批进入文档列表，可在同步队列查看进度）`)
   }
   emit('success')
   closeDialog()
@@ -466,8 +466,8 @@ async function handleClosed() {
 }
 
 .source-item.active {
-  background: #ecf5ff;
-  color: #409eff;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
   font-weight: 600;
 }
 
@@ -517,7 +517,7 @@ async function handleClosed() {
 }
 
 .dt-card:hover {
-  border-color: #409eff;
+  border-color: var(--el-color-primary);
   box-shadow: 0 2px 8px rgba(64, 158, 255, 0.12);
 }
 
@@ -533,8 +533,8 @@ async function handleClosed() {
 }
 
 .dt-card-icon.doc {
-  background: #ecf5ff;
-  color: #409eff;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
 }
 
 .dt-card-icon.kb {
@@ -563,7 +563,7 @@ async function handleClosed() {
 .dt-card-selected {
   margin-top: 8px;
   font-size: 12px;
-  color: #409eff;
+  color: var(--el-color-primary);
   font-weight: 600;
 }
 
@@ -593,8 +593,8 @@ async function handleClosed() {
 }
 
 .import-option.checked {
-  border-color: #409eff;
-  background: #ecf5ff;
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
 }
 
 .import-option :deep(.el-radio) {
@@ -649,7 +649,7 @@ async function handleClosed() {
   background: #f56c6c;
 }
 .file-type-icon.word {
-  background: #409eff;
+  background: var(--el-color-primary);
 }
 .file-type-icon.excel {
   background: #67c23a;

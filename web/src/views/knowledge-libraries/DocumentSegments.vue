@@ -4,9 +4,11 @@ import DOMPurify from 'dompurify'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Back, Search, Close, View, Top, Bottom, Edit, Delete, QuestionFilled, ArrowDown } from '@element-plus/icons-vue'
-import { listDocumentLibraries, listLibraryDocuments, getLibraryChunks, saveLibraryChunk, deleteLibraryChunk, getLibraryDocumentPreviewUrl, type DocumentLibrary, type LibraryDocument, type LibraryChunk, type LibraryChunkInput } from '@/api/document-library'
-import { settingsFromConfig } from '@/components/library/index-settings'
+import { Search, Close, Top, Bottom, Edit, Delete, QuestionFilled, ArrowDown, Setting } from '@element-plus/icons-vue'
+import { listDocumentLibraries, listLibraryDocuments, getLibraryChunks, saveLibraryChunk, deleteLibraryChunk, getLibraryDocumentPreviewUrl, setDocumentConfig, libraryDocumentAction, type DocumentLibrary, type LibraryDocument, type LibraryChunk, type LibraryChunkInput } from '@/api/document-library'
+import IndexSettingsDialog from '@/components/library/IndexSettingsDialog.vue'
+import { settingsFromConfig, settingsToConfig, type IndexSettings } from '@/components/library/index-settings'
+import { fileIcon } from '@/utils/file-icon'
 import { rewriteChunkImages } from '@/utils/chunk-images'
 import { useTabsStore } from '@/stores/tabs'
 import ParsedContentView from '@/components/common/ParsedContentView.vue'
@@ -20,7 +22,40 @@ const docId = route.params.docId as string
 const lib = ref<DocumentLibrary>()
 const doc = ref<LibraryDocument>()
 const docName = ref(String(route.query.name || ''))
-const statusLabels: Record<string, string> = {PARSING: '解析中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已停止', UNKNOWN: '状态未知'}
+
+// 索引设置：与文档列表页共用同一弹窗（文档级分段/预处理设置）
+const settingsVisible = ref(false)
+const settingsValue = ref<IndexSettings>()
+const settingsBusy = ref(false)
+function openSettings() {
+  if (!doc.value) return
+  settingsValue.value = settingsFromConfig(doc.value.config, lib.value?.config)
+  settingsVisible.value = true
+}
+async function saveSettings(v: IndexSettings, reparse: boolean) {
+  if (!doc.value) return
+  settingsBusy.value = true
+  try {
+    const updated = await setDocumentConfig(libId, docId, settingsToConfig(v))
+    Object.assign(doc.value, updated)
+    settingsVisible.value = false
+    if (reparse) {
+      await libraryDocumentAction(libId, docId, 'parse')
+      ElMessage.success('设置已保存，正在按新设置重新分段')
+      setTimeout(load, 800)
+    } else {
+      ElMessage.success('索引设置已保存，重新解析后生效')
+    }
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || e.message || '保存失败') }
+  finally { settingsBusy.value = false }
+}
+
+// 「更多」下拉：导出分段 / 源文件预览 / 解析原文预览
+function handleToolCommand(cmd: string | number | object) {
+  if (cmd === 'export') exportChunks()
+  else if (cmd === 'source') togglePreview()
+  else if (cmd === 'parsed') toggleParsed()
+}
 
 const chunks = ref<LibraryChunk[]>([])
 const total = ref(0)
@@ -206,20 +241,23 @@ onMounted(() => { loadMeta(); load() })
       <!-- 左侧：分段列表 -->
       <div class="main-col">
         <div class="toolbar">
-          <el-button link :icon="Back" @click="router.push({path: '/apply/knowledge-libraries', query: {libId: String(libId)}})">返回</el-button>
+          <img class="file-ico" :src="fileIcon(docName)" alt="" />
           <span class="doc-name" :title="docName">{{ docName }}</span>
-          <el-tag v-if="doc" :type="doc.status === 'COMPLETED' ? 'success' : doc.status === 'FAILED' ? 'danger' : 'info'">{{ statusLabels[doc.status] || doc.status }}</el-tag>
           <span class="hint">共 {{ total }} 个分段</span>
           <div class="toolbar-spacer" />
           <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索分段内容" clearable style="width: 220px" @change="page = 1; load()" />
-          <el-button :loading="busy" @click="exportChunks">导出全部分段</el-button>
-          <el-button :icon="View" :type="previewVisible ? 'primary' : ''" :loading="previewLoading" @click="togglePreview">
-            {{ previewVisible ? '关闭源文件' : '查看源文件' }}
-          </el-button>
-          <el-button :icon="View" :type="parsedVisible ? 'primary' : ''" @click="toggleParsed">
-            {{ parsedVisible ? '隐藏解析原文' : '查看解析原文' }}
-          </el-button>
+          <el-button :icon="Setting" :disabled="!doc || doc.status === 'PARSING'" @click="openSettings">索引设置</el-button>
           <el-button :icon="Search" @click="goRetrievalTest">检索测试</el-button>
+          <el-dropdown trigger="click" placement="bottom-end" @command="handleToolCommand">
+            <el-button>更多<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="export">导出全部分段</el-dropdown-item>
+                <el-dropdown-item command="source">{{ previewVisible ? '关闭源文件' : '查看源文件' }}</el-dropdown-item>
+                <el-dropdown-item command="parsed">{{ parsedVisible ? '隐藏解析原文' : '查看解析原文' }}</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
         <div class="chunks">
           <el-empty v-if="!chunks.length && !loading" description="暂无分段" />
@@ -315,6 +353,7 @@ onMounted(() => { loadMeta(); load() })
       <el-form label-position="top"><el-form-item label="分段正文" required><el-input v-model="chunkForm.content" type="textarea" :rows="12" /></el-form-item></el-form>
       <template #footer><el-button @click="chunkEdit = false">取消</el-button><el-button type="primary" :loading="busy" @click="saveChunk">保存</el-button></template>
     </el-dialog>
+    <IndexSettingsDialog v-model="settingsVisible" title="索引设置" scope="document" :value="settingsValue || null" @confirm="saveSettings" />
   </div>
 </template>
 <style scoped>
@@ -325,7 +364,10 @@ onMounted(() => { loadMeta(); load() })
 .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .with-preview .main-col { max-width: calc(50% - 8px); }
 
-.toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+/* 收紧工具栏按钮间距：Element 默认相邻按钮 12px，压缩为 3px（加 gap 6px = 9px） */
+.toolbar :deep(.el-button + .el-button) { margin-left: 3px; }
+.file-ico { width: 20px; height: 20px; flex: none; object-fit: contain; }
 .toolbar-spacer { flex: 1; min-width: 12px; }
 .doc-name { font-size: 15px; font-weight: 600; color: #303133; max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hint { color: #909399; font-size: 13px; }

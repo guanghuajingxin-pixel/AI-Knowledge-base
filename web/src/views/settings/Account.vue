@@ -9,6 +9,8 @@ import { changePassword, getDingtalkConfig } from '@/api/auth'
 import { gotoDingtalkAuth, checkPasswordStrength } from '@/utils/dingtalk-auth'
 import { formatDate } from '@/utils/format'
 import type { UserRole } from '@/types/user'
+import { authConfig } from '@/auth/session'
+import UnifiedAccountPanel from '@/components/common/unified-account-panel.vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -110,7 +112,8 @@ async function handleChangePassword() {
 </script>
 
 <template>
-  <PageContainer title="个人账户">
+  <UnifiedAccountPanel v-if="authConfig?.provider === 'keycloak'" />
+  <PageContainer v-else title="个人账户">
     <div class="account-wrap">
       <!-- 基本信息 -->
       <el-card shadow="never">

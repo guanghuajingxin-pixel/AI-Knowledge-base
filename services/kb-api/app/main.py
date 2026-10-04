@@ -168,6 +168,8 @@ app.include_router(knowledge_base.router)
 app.include_router(directory.router)
 app.include_router(document.router)
 app.include_router(search.router)
+from app.routes import open_api
+app.include_router(open_api.router)
 app.include_router(settings_route.router)
 app.include_router(knowledge_center.router)
 app.include_router(knowledge_library.router)

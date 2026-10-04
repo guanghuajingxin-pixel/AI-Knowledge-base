@@ -42,16 +42,14 @@ DATA_DIR = Path(os.getenv("DEER_FLOW_HOME", str(BACKEND_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = Path(os.getenv("DEER_FLOW_CONFIG_PATH", str(BACKEND_DIR / "config.yaml")))
 
-# 人格（SOUL.md）与技能（SKILL.md）路径
-# - SOUL.md / SKILL.md：DeerFlow 运行时实际读取的文件（每次引导按自定义或默认模板重写）
-# - *.custom.md：用户在前端保存的自定义内容，重启/重载不丢失；删除即恢复默认
+# 人格（SOUL.md）路径
+# - SOUL.md：DeerFlow 运行时实际读取的人格文件（每次引导按自定义或默认模板重写）
+# - persona.custom.md：用户在前端保存的自定义内容，重启/重载不丢失；删除即恢复默认
 SOUL_PATH = DATA_DIR / "SOUL.md"
 PERSONA_CUSTOM_PATH = DATA_DIR / "persona.custom.md"
 _DEFAULT_AGENT_NAME = "杰克百晓生"
 _BOOT_AGENT_NAME = ""   # 引导/热更新时从 kb-api 配置读取的智能体名
 SKILLS_DIR = BACKEND_DIR.parent / "skills"
-SKILL_FILE = SKILLS_DIR / "custom" / "enterprise-kb-qa" / "SKILL.md"
-SKILL_CUSTOM_PATH = DATA_DIR / "skill.custom.md"
 _MAX_PROMPT_CHARS = 20000
 
 os.environ.setdefault("DEER_FLOW_HOME", str(DATA_DIR))
@@ -63,140 +61,20 @@ logger = logging.getLogger("qa_server")
 # 人格与技能
 # ---------------------------------------------------------------------------
 
-SOUL_MD = """你是「杰克百晓生」，知识治理平台内置的企业知识问答助手。
+SOUL_MD = """你是「杰克百晓生」，知识治理平台内置的智能助手。
 
-你的职责：从企业知识库中全面、系统地检索信息，并把检索到的知识整合、提炼成
-**直接、明确、简洁**的答案。你有四个检索工具：
+你的行为由两部分共同驱动：
+- 人格（SOUL.md，即本文档）：定义你的身份、语气与总体行为准则；
+- 技能库（SKILL.md）：面对具体任务时，按已启用技能的适用场景与流程执行。
 
-- knowledge_search：检索企业知识库（语义+全文检索，返回文档正文片段，是答案内容的主要来源）
-- dingtalk_browse：浏览钉钉知识库目录地图（action="map"）与某目录下文档列表（action="list"，在线文档优先）
-- dingtalk_search：按文件名/目录路径关键词检索钉钉文档（返回名称、链接、node_id）
-- dingtalk_read_doc：读取钉钉文档的**正文内容**（Markdown），在线文档秒读，办公文档下载解析
+每次对话前你都会获得当前已启用技能的说明。当用户的任务命中某个技能的适用场景时，
+严格按该技能定义的条件、步骤与输出规范执行；技能未覆盖的任务按通用助手方式处理。
 
-## 回答流程
-
-### 第一步：预判目录，定位文档（先看地图，再进目录）
-凡涉及公司内部信息的问题，按以下顺序系统检索，不要盲目顺序读取：
-1. 先仅调用 knowledge_search 检索企业知识库。证据充分则直接作答。
-   证据不足时，调用 ask_clarification（approach_choice），填写 evidence_summary、confidence、confidence_reason，
-   先给出原文内容总结、缺口与置信度（证据支持程度，非准确率），提供“继续从钉钉知识库探索”和“基于知识库内容回答”。
-   未获用户明确选择前禁止钉钉调用。用户同意后才调用 `dingtalk_browse(action="map")`；
-2. 根据问题主题（差旅/安全/研发/品质…）**预判最可能的知识库和目录**；
-3. 用 `dingtalk_browse(action="list", directory="目录关键词")` 列出该目录文档，
-   结果中**在线文档（online=true，adoc/md/txt）排最前，优先精读在线文档**
-   （秒读正文），其次才是 docx/pdf 等需下载解析的办公文档；
-4. 目录预判不到时，再用 dingtalk_search 按文件名关键词补充检索。
-5. 闲聊、问候、身份询问无需检索，直接友好回应。
-
-### 第二步：逐篇精读，每篇确认
-1. 用 dingtalk_read_doc 读取文档正文（传 node_id、extension、title）；
-2. **每读完一篇，立即判断其内容能否回答用户问题**：
-   - 能回答 → 停止扩展，直接进入第三步作答；
-   - 部分相关 → 记录有用条款，再读下一篇补齐；
-   - 无关 → 放弃该篇，换下一篇，不要无差别顺序读完整个目录。
-3. 检索词不理想时换同义词、上下位词、拆解子问题；复杂问题拆成子问题分别检索。
-4. **禁止仅根据文件名猜测内容或只给文档链接而不读正文。**
-
-### 第三步：整合提炼，形成答案
-1. **基于检索到的内容作答**，绝不编造知识库中不存在的制度、数字、流程、责任人；
-   不确定的部分明确标注"知识库中暂无明确记录"。
-2. 对多个来源、多次检索的结果进行**归纳、合并、去重**，形成结构化的直接答案
-   （要点分条、必要时给步骤），不要把原始检索片段堆砌给用户。
-3. 答案**简洁精炼**：直击问题，先说结论，必要的依据紧随其后。
-4. **【严格】答案第一句必须直接是实质内容**（如"根据《……》规定，……"），
-   严禁任何过程性开场白，例如"我来为您检索""让我整理一下""我已经检索到了"
-   "I now have…""Let me compile…"等——这类语句一律不得出现；
-   全程使用中文，不输出英文思考语句；不要重复用户的问题原文。
-5. **【严格】禁止输出你的分析/规划/检索过程**。最终答案只给用户看结论和依据，
-   绝不能包含以下任何内容：
-   - "用户询问…""用户问题…""已执行搜索""已检索""任务背景""当前状态"
-     "下一步建议""已定位文档清单""检索词""召回""未命中"等过程元信息；
-   - 工具返回的原始 JSON、node_id、路径、工作空间、链接清单的罗列；
-   - 你对检索结果的内部分析、判断、下一步打算。
-   这些是你的思考过程，不是给用户的答案。答案 = 问题的直接回答 + 引用标注。
-6. 引用事实处用 [1][2] 标注 ref 序号；钉钉知识库命中的相关文档，
-   在答案末尾以"可参阅"形式给出文档名和链接（它是指引，不是答案主体）。
-
-### 第四步：检索时限与用户确认（系统自动管控，无需你计时）
-检索时长由系统自动管控，你没有墙钟概念，也不要自己判断"是否该停下来问用户"：
-- 用户同意钉钉探索后满 1 分钟、以及用户选择继续后再满 5 分钟时，**系统会自动**向用户弹出
-  "继续探索 / 先基于已检索内容回答"选择按钮——你无需、也不要为此主动调用
-  ask_clarification，照常继续检索即可；
-- 用户选择"继续探索"后，你会收到选项文字的用户消息——照常按第一、二步继续检索；
-- 你收到【用户选择停止探索】系统消息时（用户点了"先基于已检索内容回答"）：
-  **立即停止一切工具调用**，依据已检索内容给出最终答案；资料不足时明确说明
-  已查过的方向，并建议换个问法、提供更具体的文档名称/目录或发起知识征集；
-- 总时长满 10 分钟系统会自动结束并告知用户"当前知识库无法获得准确答案"。
-
-### 第五步：如实说明覆盖范围
-- 两个来源都没有相关内容时，明确告知"知识库和钉钉文档中均未检索到相关内容"，
-  并一句话建议通过知识征集渠道补充——不要用通用常识冒充企业规定。
-- 用户问题存在根本性歧义、无法合理推断意图时（如问"那个制度"），
-  才使用 ask_clarification；能合理推断的直接检索，不要轻易要求澄清。
-
-## 交互风格
-- 中文作答；仅回答本轮问题，必要的依据紧随结论。
-- 未被询问的关联信息不附加到答案；不使用泛泛追问结尾。
-"""
-
-# 默认问答技能（enterprise-kb-qa/SKILL.md 的内置模板）。
-# 与 SOUL_MD 一样支持在前端「智能体配置 → 人格与技能」中自定义，
-# 自定义内容持久化到 DATA_DIR/skill.custom.md，重启/重载不丢失。
-SKILL_MD = """---
-name: enterprise-kb-qa
-description: 企业知识库问答工作流。当用户询问公司内部的制度、流程、规范、产品文档、审批规则、操作手册等问题时使用，指导如何检索企业知识库、引用来源并给出可信回答。
-version: 1.0.0
----
-
-# 企业知识库问答（enterprise-kb-qa）
-
-你是「杰克百晓生」，通过 `knowledge_search`、`dingtalk_browse`、`dingtalk_search`、
-`dingtalk_read_doc` 四个工具检索企业知识，所有事实性回答必须以检索到的正文内容为依据。
-
-## 工作流
-
-1. **判断意图**
-   - 问候、身份询问、闲聊 → 直接友好回应，不调用工具。
-   - 企业内部信息问题 → 必须先检索再回答，先仅检索企业知识库；证据不足时总结内容、给出置信度，并询问用户是否继续钉钉探索。
-   - 与企业知识完全无关且超出职责范围 → 礼貌说明你只负责企业知识问答。
-
-2. **先预判目录，再进目录（不要盲目顺序读取）**
-   - 先调用 `knowledge_search`。不足时用 ask_clarification（approach_choice）填写 evidence_summary、confidence、confidence_reason；
-     只有用户点击“继续从钉钉知识库探索”后才调用 `dingtalk_browse(action="map")`；
-   - 根据问题主题（差旅/安全/研发/品质…）预判最可能的知识库和目录，
-     用 `dingtalk_browse(action="list", directory="目录关键词")` 列出该目录文档；
-   - list 结果中**在线文档（online=true）排在最前，优先精读在线文档**（秒读正文），
-     其次才是 docx/pdf 等需下载解析的办公文档；
-   - 目录预判不到时，再用 `dingtalk_search` 按文件名关键词补充检索；
-   - 检索词不理想时换同义词、上下位词、拆解子问题，每个来源最多尝试 3-5 次。
-
-3. **逐篇精读，每篇确认**
-   - 用 `dingtalk_read_doc`（传 node_id、extension、title）读取文档正文；
-   - **每读完一篇立即判断能否回答问题**：能答 → 停止扩展并作答；
-     部分相关 → 记录有用条款再读下一篇补齐；无关 → 放弃换篇，
-     不要无差别顺序读完整个目录；
-   - 禁止仅根据文件名猜测内容或只给文档链接而不读正文。
-
-4. **检索时限与用户确认（系统自动管控）**
-   - 你没有墙钟概念，也不要自己判断超时：用户同意钉钉探索后满 1 分钟、继续后再满 5 分钟时，
-     系统会自动向用户弹出"继续探索 / 先基于已检索内容回答"选择按钮，
-     你无需、也不要为此主动调用 `ask_clarification`，照常检索即可；
-   - 用户点"继续探索"会以选项文字作为新消息到来，按第一、二步继续检索；
-   - 用户点"先基于已检索内容回答"时你会收到【用户选择停止探索】系统消息：
-     立即停止一切工具调用，基于已检索内容作答；依据不足则明确说明已查方向
-     并建议换个问法或知识征集；
-   - 总时长满 10 分钟系统自动结束；仅当问题存在根本性歧义（完全无法推断对象）时，
-     才主动用 `ask_clarification` 澄清。
-
-5. **作答规范**
-   - 中文回答，先结论后细节，要点分条；流程类问题用编号步骤。
-   - 答案第一句直接是实质内容，不写"我来检索""让我整理"等过程性开场白，
-     不输出分析/规划/检索过程。
-   - 引用检索内容时标注 `[ref 序号]`，例如 [1][2]。
-   - 钉钉命中的文档以"可参阅"形式在答案末尾给出文档名和链接。
-   - 召回内容不足以下结论时，明确说明"知识库中暂未检索到相关内容"，
-     并建议用户发起知识征集或换个问法；绝不用通用常识编造企业规定。
-   - 答案聚焦用户问题，不要罗列与问题无关的召回内容。
+总体行为准则：
+- 中文作答，先结论后细节，要点分条；
+- 只做当前被要求的事，不附加未被询问的信息；
+- 不向用户展示内部思考、工具参数、检索过程等过程性内容；
+- 需要用户补充信息时，用 ask_clarification 澄清。
 """
 
 # ---------------------------------------------------------------------------
@@ -339,22 +217,13 @@ def _apply_retrieval_mode(message: str, mode: str) -> str:
     return message
 
 
-def _effective_skill() -> str:
-    """当前生效的技能内容：优先自定义，否则默认模板。"""
-    if SKILL_CUSTOM_PATH.exists():
-        return SKILL_CUSTOM_PATH.read_text(encoding="utf-8")
-    return SKILL_MD
-
-
-def write_persona_and_skill() -> None:
-    """把生效中的人格/技能写入 DeerFlow 运行时读取的文件。"""
+def write_persona() -> None:
+    """把生效中的人格写入 DeerFlow 运行时读取的文件。"""
     SOUL_PATH.write_text(_effective_persona(), encoding="utf-8")
-    SKILL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SKILL_FILE.write_text(_effective_skill(), encoding="utf-8")
 
 
 def ensure_bootstrapped() -> bool:
-    """启动引导：拉取配置 → 写 config.yaml + SOUL.md + SKILL.md。成功返回 True。"""
+    """启动引导：拉取配置 → 写 config.yaml + SOUL.md。成功返回 True。"""
     global _BOOT_AGENT_NAME
     boot = _bootstrap_from_kbapi() or _bootstrap_from_env()
     if not boot or not boot.get("api_key"):
@@ -362,11 +231,8 @@ def ensure_bootstrapped() -> bool:
         return False
     _BOOT_AGENT_NAME = str(boot.get("agent_name") or "").strip()
     write_config(boot)
-    write_persona_and_skill()
-    logger.info(
-        "persona/skill ready (persona_custom=%s skill_custom=%s)",
-        PERSONA_CUSTOM_PATH.exists(), SKILL_CUSTOM_PATH.exists(),
-    )
+    write_persona()
+    logger.info("persona ready (persona_custom=%s)", PERSONA_CUSTOM_PATH.exists())
     return True
 
 
@@ -433,6 +299,7 @@ class ChatStreamIn(BaseModel):
     dataset_ids: list[str] | None = None
     ragflow_dataset_ids: list[str] | None = None  # RAGFlow 数据集（与 Dify 并列的第二检索引擎）
     kb_ids: list[str] | None = None    # 平台本地知识库（ES hybrid）ID 列表
+    doc_library_ids: list[int] | None = None  # 平台文档库（knowledge_libraries）ID 列表，本地检索通道
     top_k: int = 8
     disabled_tools: list[str] = []   # 停用的工具名（来自智能体配置 tools_enabled）
     retrieval_mode: str = "smart"    # smart=智能调用；force=每问必检索（平台约束前缀注入）
@@ -457,17 +324,12 @@ def reload_config():
     if not boot or not boot.get("api_key"):
         return {"ok": False, "error": "bootstrap unavailable"}
     write_config(boot)
-    write_persona_and_skill()
+    write_persona()
     reset_client()
     return {"ok": True, "model": boot.get("model")}
 
 
 class PersonaIn(BaseModel):
-    content: str | None = None
-    reset: bool = False
-
-
-class SkillIn(BaseModel):
     content: str | None = None
     reset: bool = False
 
@@ -500,41 +362,11 @@ def update_persona(body: PersonaIn):
     return {"ok": True, "custom": PERSONA_CUSTOM_PATH.exists()}
 
 
-@app.get("/v1/skill")
-def get_skill():
-    """读取当前生效的问答技能（SKILL.md）内容。"""
-    return {
-        "content": _effective_skill(),
-        "custom": SKILL_CUSTOM_PATH.exists(),
-        "default": SKILL_MD,
-        "skill_name": "enterprise-kb-qa",
-    }
-
-
-@app.post("/v1/skill")
-def update_skill(body: SkillIn):
-    """保存自定义技能（reset=true 恢复默认）。热重载 Agent，新对话即时生效。"""
-    if body.reset:
-        SKILL_CUSTOM_PATH.unlink(missing_ok=True)
-    else:
-        content = (body.content or "").strip()
-        if not content:
-            return {"ok": False, "error": "content 不能为空"}
-        if len(content) > _MAX_PROMPT_CHARS:
-            return {"ok": False, "error": f"内容过长（{len(content)} > {_MAX_PROMPT_CHARS}）"}
-        SKILL_CUSTOM_PATH.write_text(content + "\n", encoding="utf-8")
-    SKILL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SKILL_FILE.write_text(_effective_skill(), encoding="utf-8")
-    reset_client()
-    logger.info("skill updated (custom=%s)", SKILL_CUSTOM_PATH.exists())
-    return {"ok": True, "custom": SKILL_CUSTOM_PATH.exists()}
-
-
 @app.post("/v1/reconfig")
 def reconfig():
     """热更新引导配置：kb-api 智能体配置保存后调用。
 
-    重新拉取 bootstrap（模型/超参/agent_name）→ 重写 config.yaml 与 SOUL/SKILL →
+    重新拉取 bootstrap（模型/超参/agent_name）→ 重写 config.yaml 与 SOUL →
     重置 Agent 单例，新对话即时生效；拉取失败时保持现配置不变。
     """
     global _BOOT_AGENT_NAME
@@ -543,7 +375,7 @@ def reconfig():
         return {"ok": False, "error": "bootstrap config unavailable"}
     _BOOT_AGENT_NAME = str(boot.get("agent_name") or "").strip()
     write_config(boot)
-    write_persona_and_skill()
+    write_persona()
     reset_client()
     logger.info("reconfig applied: model=%s agent_name=%s",
                 boot.get("model"), _BOOT_AGENT_NAME or "(default)")
@@ -554,10 +386,9 @@ def reconfig():
 # 技能库管理：ClawHub/Agent Skills 通用结构（每个技能一个目录 + SKILL.md）
 # 技能目录位于 skills/custom/<slug>/SKILL.md，DeerFlow 在新对话构建提示词时
 # 通过 deerflow.skills.loader 扫描加载，新增/删除文件即对新对话生效。
-# enterprise-kb-qa 为内置问答技能，由 /v1/skill 单独维护，不在此管理。
+# 全部技能（含企业知识库问答）统一在此管理，不做内置特判。
 # ---------------------------------------------------------------------------
 
-BUILTIN_QA_SKILL = "enterprise-kb-qa"
 _SLUG_RE = re.compile(r"[^a-z0-9\-_]+")
 
 
@@ -652,7 +483,6 @@ def _list_custom_skills() -> list[dict[str, Any]]:
                 "description": meta.get("description", ""),
                 "content": content,
                 "enabled": enabled,
-                "builtin": skill_dir.name == BUILTIN_QA_SKILL,
             })
     # 启用在前，按名称排序
     skills.sort(key=lambda s: (not s["enabled"], s["name"]))
@@ -682,8 +512,6 @@ def put_skill(body: SkillDocIn):
     if not name:
         return {"ok": False, "error": "技能名称不能为空"}
     slug = _slugify(name)
-    if slug == BUILTIN_QA_SKILL:
-        return {"ok": False, "error": f"{BUILTIN_QA_SKILL} 为内置技能，请在「人格与技能」中维护"}
 
     content = (body.content or "").strip()
     # 始终以表单名称/描述为准同步 frontmatter（ClawHub 结构 name 必填）
@@ -691,7 +519,7 @@ def put_skill(body: SkillDocIn):
 
     # 改名场景：旧 slug 与新 slug 不一致时清除旧目录
     old_slug = _slugify(body.slug) if body.slug else ""
-    if old_slug and old_slug != slug and old_slug != BUILTIN_QA_SKILL:
+    if old_slug and old_slug != slug:
         old_named = _find_skill_dir(old_slug)
         if old_named is not None and SKILLS_DIR.resolve() in old_named.resolve().parents:
             shutil.rmtree(old_named)
@@ -709,11 +537,9 @@ def put_skill(body: SkillDocIn):
 
 @app.delete("/v1/skills/{slug}")
 def delete_skill(slug: str):
-    """删除技能目录（内置问答技能不可删）。"""
+    """删除技能目录。"""
     import shutil
 
-    if slug == BUILTIN_QA_SKILL:
-        return {"ok": False, "error": "内置问答技能不可删除"}
     skill_dir = _find_skill_dir(slug)
     if skill_dir is None:
         return {"ok": False, "error": "技能不存在"}
@@ -779,6 +605,7 @@ def _event_stream(body: ChatStreamIn):
         "dataset_ids": body.dataset_ids or [],
         "ragflow_dataset_ids": body.ragflow_dataset_ids or [],
         "kb_ids": body.kb_ids or [],
+        "doc_library_ids": body.doc_library_ids or [],
         "top_k": body.top_k,
         "retrieval_mode": (body.retrieval_mode or "smart").strip().lower(),
         "max_retrieval_rounds": max(1, int(body.max_retrieval_rounds or 2)),
@@ -1003,9 +830,7 @@ class ChatCancelIn(BaseModel):
 def chat_cancel(body: ChatCancelIn):
     """用户手动中断：标记 thread 取消，进行中的 SSE 流在下一个事件边界停止，
     未开始的模型调用由 ExplorationTimeoutMiddleware 短路（不再消耗 token）。"""
-    from deerflow.agents.middlewares.exploration_timeout_middleware import (
-        ExplorationTimeoutMiddleware,
-    )
+    from deerflow.agents.middlewares.exploration_timeout_middleware import ExplorationTimeoutMiddleware
     active = ExplorationTimeoutMiddleware.request_cancel(body.thread_id)
     logger.info("[qa] cancel request thread=%s active=%s", body.thread_id, active)
     return {"cancelled": bool(active)}

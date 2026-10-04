@@ -73,9 +73,28 @@ def _recover_source(source_id: int) -> None:
 
 
 def recover_interrupted_runs() -> None:
+    """收编孤儿 running run（30s 周期扫描）。
+
+    batch run（library 编目预建任务的 run）跨批次长驻 running 是健康状态，
+    仅当长时间无推进（批处理作业死亡/被停）才按 sync_batch_stale_run_seconds 收编；
+    直跑模式（dify/ragflow）保持原 per-source 双锁收编逻辑。
+    """
+    from datetime import timedelta
+
     with SyncSessionLocal() as db:
-        source_ids = [r.source_id for r in db.query(SyncRun.source_id).filter_by(status='running').distinct()]
-    for source_id in source_ids:
+        # 派生判定 batch run：存在携带 library_document_id 的任务（无迁移、无新列）
+        batch_run_ids = {r[0] for r in db.query(SyncTask.run_id).filter(
+            SyncTask.library_document_id.isnot(None),
+            SyncTask.run_id.isnot(None)).distinct()}
+        stale_before = datetime.utcnow() - timedelta(
+            seconds=get_settings().sync_batch_stale_run_seconds)
+        rows = db.query(SyncRun.id, SyncRun.source_id, SyncRun.started_at).filter_by(
+            status='running').all()
+    for run_id, source_id, started_at in rows:
+        if run_id in batch_run_ids:
+            if started_at and started_at < stale_before:
+                finish_interrupted(run_id, '批处理长时间未推进（批处理作业可能已停止），任务已标记失败，可重新同步')
+            continue
         with source_lock(source_id, SUPERVISOR_LOCK) as supervisor_free:
             if not supervisor_free:
                 continue

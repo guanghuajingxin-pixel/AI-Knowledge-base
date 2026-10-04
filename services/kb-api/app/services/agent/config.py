@@ -35,6 +35,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "models": [],                 # 参与调度的模型名列表（最多 10）；为空则用系统配置的 llm_model
     "default_model": "",          # 智能体默认模型（须为 models 之一）；为空跟随列表首个模型
     "retrieval_mode": "smart",    # smart=智能调用（闲聊/问候不检索）；force=强制调用（每问必检索）
+    # 问答检索的知识库范围（knowledge_libraries 表 ID）：空=不检索（未选择=不使用）；
+    # 文档库走本地检索通道，DIFY/RAGFlow 外部库走各自引擎通道
+    "knowledge_library_ids": [],
+    # 智能体级停用的选库（knowledge_library_ids 的子集，UI 开关控制）：
+    # 停用的库不参与该智能体检索（不删除绑定，可随时重新启用），随配置一起保存
+    "knowledge_library_disabled_ids": [],
     "greeting_enabled": True,     # 对话开场白
     "greeting": "你好！我是杰克百晓生，公司知识问答助手。",
     "suggested_questions": [      # 开场白下的推荐问题
@@ -155,6 +161,8 @@ async def load_agent_config(session: AsyncSession) -> dict[str, Any]:
         out["default_model"] = ""
     out["suggested_questions"] = [str(q).strip() for q in (out.get("suggested_questions") or []) if str(q).strip()][:6]
     out["tools_enabled"] = _normalize_tools(data.get("tools_enabled"))
+    out["knowledge_library_ids"] = _normalize_library_ids(data.get("knowledge_library_ids"))
+    out["knowledge_library_disabled_ids"] = _normalize_library_ids(data.get("knowledge_library_disabled_ids"))
     out["external_agents"] = _normalize_external(data.get("external_agents"))
     out["bot_avatar"] = _normalize_avatar(data.get("bot_avatar"))
     return out
@@ -168,6 +176,21 @@ def _normalize_tools(raw: Any) -> dict[str, bool]:
             if k in raw:
                 base[k] = bool(raw[k])
     return base
+
+
+def _normalize_library_ids(raw: Any) -> list[int]:
+    """智能体检索选库白名单：仅接受正整数 ID 列表（去重、最多 24 个）。"""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[int] = []
+    for v in raw:
+        try:
+            i = int(v)
+        except (TypeError, ValueError):
+            continue
+        if i > 0 and i not in out:
+            out.append(i)
+    return out[:24]
 
 
 def _normalize_avatar(raw: Any) -> str:
@@ -192,6 +215,8 @@ async def save_agent_config(session: AsyncSession, cfg: dict[str, Any]) -> dict[
         data["default_model"] = ""
     data["suggested_questions"] = [str(q).strip() for q in (data.get("suggested_questions") or []) if str(q).strip()][:6]
     data["tools_enabled"] = _normalize_tools(cfg.get("tools_enabled"))
+    data["knowledge_library_ids"] = _normalize_library_ids(cfg.get("knowledge_library_ids"))
+    data["knowledge_library_disabled_ids"] = _normalize_library_ids(cfg.get("knowledge_library_disabled_ids"))
     data["external_agents"] = _normalize_external(cfg.get("external_agents"))
     data["bot_avatar"] = _normalize_avatar(data.get("bot_avatar"))
     for bool_key in ("greeting_enabled", "follow_up_enabled", "planning_enabled",

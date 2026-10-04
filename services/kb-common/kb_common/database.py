@@ -35,6 +35,25 @@ async def get_session() -> AsyncSession:
 
 
 @asynccontextmanager
+async def fresh_session():
+    """独立短命引擎+会话：供非主事件循环的后台线程（批处理/XXL 执行器线程）使用。
+
+    全局 engine/SessionLocal 的 asyncpg 连接池绑定首次使用它的事件循环
+    （FastAPI 主 loop）；在批处理线程 asyncio.run 产生的临时 loop 里复用会报
+    "got Future attached to a different loop"。此类场景每次新建独立引擎、
+    用完即弃（批处理每批仅数篇，建连开销可忽略）。
+    """
+    eng = create_async_engine(settings.database_url, echo=False,
+                              connect_args=_connect_args)
+    try:
+        async with async_sessionmaker(eng, expire_on_commit=False,
+                                      class_=AsyncSession)() as s:
+            yield s
+    finally:
+        await eng.dispose()
+
+
+@asynccontextmanager
 async def short_session():
     """一次性短会话：进出即归还连接。
 

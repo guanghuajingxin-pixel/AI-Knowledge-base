@@ -179,6 +179,12 @@ function schedulePoll() {
 onMounted(async () => {
   listSources().then((list) => { sources.value = list }).catch(() => { /* 拦截器已提示 */ })
   await load()
+  // 首次进入：有排队中的任务（如新编目的自动同步）默认停在「待处理」页签
+  if (tabs.value.pending > 0 && activeTab.value === 'done') {
+    activeTab.value = 'pending'
+    page.value = 1
+    await load()
+  }
   schedulePoll()
 })
 onBeforeUnmount(() => {
@@ -331,7 +337,7 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="操作" width="76" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="row.status === 'failed'" link type="primary" @click="retryOne(row as SyncTask)">重试</el-button>
+            <el-button v-if="row.status === 'failed'" link type="primary" size="small" @click="retryOne(row as SyncTask)">重试</el-button>
             <span v-else class="op-none">-</span>
           </template>
         </el-table-column>
@@ -373,14 +379,17 @@ onBeforeUnmount(() => {
 
 .filter-bar {
   margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
 }
 
 .filter-bar :deep(.el-form-item) {
   margin-bottom: 10px;
 }
 
-.filter-actions {
-  margin-left: 8px;
+.filter-bar :deep(.filter-actions) {
+  margin-left: auto;
 }
 
 .expand-toggle {

@@ -978,7 +978,7 @@ function shortSegId(id?: string): string {
 
 .stat-dify { color: #67c23a; }
 .stat-ragflow { color: #f56c6c; }
-.stat-enabled { color: #2b6bff; }
+.stat-enabled { color: var(--app-brand-blue); }
 
 .stat-label {
   font-size: 12px;

@@ -113,7 +113,7 @@ async def get_greeting(u=Depends(get_current_user),
 
 
 # ---------------------------------------------------------------------------
-# 人格（SOUL）与技能（SKILL）：DeerFlow sidecar 上可热编辑的提示词配置
+# 人格（SOUL）：DeerFlow sidecar 上可热编辑的提示词配置
 # ---------------------------------------------------------------------------
 
 @router.get("/persona")
@@ -127,22 +127,6 @@ async def update_persona(body: dict,
                          u=Depends(require_role("super_admin", "admin"))):
     """保存自定义人格（reset=true 恢复默认），保存后新对话即时生效。"""
     return await _df_post("/v1/persona", {
-        "content": body.get("content"),
-        "reset": bool(body.get("reset", False)),
-    })
-
-
-@router.get("/skill")
-async def get_skill(u=Depends(require_role("super_admin", "admin"))):
-    """读取问答技能（SKILL.md）当前内容与默认模板。"""
-    return await _df_get("/v1/skill")
-
-
-@router.put("/skill")
-async def update_skill(body: dict,
-                       u=Depends(require_role("super_admin", "admin"))):
-    """保存自定义技能（reset=true 恢复默认），保存后新对话即时生效。"""
-    return await _df_post("/v1/skill", {
         "content": body.get("content"),
         "reset": bool(body.get("reset", False)),
     })

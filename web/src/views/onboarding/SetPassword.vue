@@ -71,7 +71,7 @@ async function handleSubmit() {
   <div class="setpwd-page">
     <div class="setpwd-card">
       <div class="setpwd-header">
-        <el-icon size="40" color="#409EFF"><Reading /></el-icon>
+        <el-icon size="40" color="var(--el-color-primary)"><Reading /></el-icon>
         <h2>设置本地密码</h2>
       </div>
       <el-alert

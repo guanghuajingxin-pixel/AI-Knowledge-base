@@ -1,9 +1,12 @@
 import asyncio
+import logging
 from kb_common.clients import es_client
 from kb_common.rag import embedder, reranker
 from elasticsearch import AsyncElasticsearch
 
 from kb_common.rag.scoring import cosine, prepare_query, document_tokens, term_scores, blend
+
+logger = logging.getLogger(__name__)
 
 
 async def _knn(es: AsyncElasticsearch, index: str, vector, top_k: int, filters: dict):
@@ -48,7 +51,14 @@ async def _search(kb_ids, query, top_k, filters, rerank, mode):
         raise ValueError("top_k 必须介于 1 和 100 之间")
     filters = filters or {}
     count = max(100, top_k * 5)
-    qvec = (await asyncio.to_thread(embedder.embed, [query]))[0] if mode != 'keyword' else None
+    qvec = None
+    if mode != 'keyword':
+        try:
+            qvec = (await asyncio.to_thread(embedder.embed, [query]))[0]
+        except embedder.EmbeddingError as e:
+            if mode == 'semantic':
+                raise  # 纯向量检索依赖向量，缺向量无法降级
+            logger.warning("ES kb %s embedding failed, fallback to keyword: %s", kb_ids, e)
     es = es_client.es
     candidates = {}
     for kb_id in dict.fromkeys(kb_ids):
@@ -81,9 +91,18 @@ async def _search(kb_ids, query, top_k, filters, rerank, mode):
                 raise ValueError('候选分段缺少向量，无法计算混合分数，请重建索引')
         hit['token_similarity'] = token
         hit['vector_similarity'] = similarity
-        hit['score_type'] = {'keyword': 'ragflow_token', 'semantic': 'cosine', 'hybrid': 'ragflow_hybrid'}[mode]
-        hit['semantic_weight'] = 1.0 if mode == 'semantic' else 0.7
-        hit['score'] = token if mode == 'keyword' else (similarity if mode == 'semantic' else blend(token, similarity, 0.7))
+        if mode == 'keyword' or similarity is None:
+            hit['score_type'] = 'ragflow_token'
+            hit['semantic_weight'] = 0.0
+            hit['score'] = token
+        elif mode == 'semantic':
+            hit['score_type'] = 'cosine'
+            hit['semantic_weight'] = 1.0
+            hit['score'] = similarity
+        else:
+            hit['score_type'] = 'ragflow_hybrid'
+            hit['semantic_weight'] = 0.7
+            hit['score'] = blend(token, similarity, 0.7)
         if hit['score'] > 0:
             docs.append(hit)
     docs.sort(key=lambda h: -h['score'])

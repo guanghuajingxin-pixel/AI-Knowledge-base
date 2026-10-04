@@ -1,23 +1,27 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Back, Clock, Document, Plus, QuestionFilled, Search } from '@element-plus/icons-vue'
+import { ArrowDown, Clock, CollectionTag, Delete, Document, Download, Filter, FolderOpened, Plus, QuestionFilled, Search } from '@element-plus/icons-vue'
 import { listDocumentLibraries, saveDocumentLibrary, listLibraryDocuments,
   libraryDocumentAction, setDocumentEnabled, deleteLibraryDocument, setDocumentConfig,
-  deleteDocumentLibrary, exportDocumentLibrary, listEmbeddingModels, downloadOriginal, setLibraryDocumentTags,
+  deleteDocumentLibrary, listEmbeddingModels, downloadOriginal, setLibraryDocumentTags,
   type DocumentLibrary, type LibraryDocument } from '@/api/document-library'
 import IndexSettingsDialog from '@/components/library/IndexSettingsDialog.vue'
 import IndexSettingsPanel from '@/components/library/IndexSettingsPanel.vue'
 import RetrievalSettingsPanel from '@/components/library/RetrievalSettingsPanel.vue'
 import AddKnowledgeDialog from '@/components/kb/AddKnowledgeDialog.vue'
 import KgPagination from '@/components/common/KgPagination.vue'
+import { fileIcon } from '@/utils/file-icon'
 import { settingsFromConfig, settingsToConfig, librarySettingsFromConfig, defaultSettings,
   defaultRetrievalSettings, retrievalFromConfig, METHODS, type IndexSettings, type RetrievalSettings } from '@/components/library/index-settings'
 import { updateKnowledgeLibrary } from '@/api/knowledge-library'
 import { useUserStore } from '@/stores/user'
-import { formatDateTime, formatFileSize, formatSource } from '@/utils/format'
+import { useTabsStore } from '@/stores/tabs'
+import { SOURCE_LABELS, formatDateTime, formatFileSize, formatSource } from '@/utils/format'
 const router = useRouter()
+const route = useRoute()
+const tabsStore = useTabsStore()
 const props = defineProps<{ openLibId?: number }>()
 const canPublish = computed(() => ['admin', 'super_admin'].includes(useUserStore().userInfo?.role || ''))
 const libraries = ref<DocumentLibrary[]>([])
@@ -27,8 +31,18 @@ const loading = ref(false)
 const busy = ref(false)
 const error = ref('')
 const keyword = ref('')
+// 文档过滤器：任务进度/来源/状态 3 个核心字段在工具行直显；
+// 更新时间/训练时间挂在漏斗弹层中筛选（按起始日期，含当天）
+const docFilters = reactive({status: '', source: '', enabled: '', updated_after: null as string | null, trained_after: null as string | null})
+const timeFilterCount = computed(() => [docFilters.updated_after, docFilters.trained_after].filter(Boolean).length)
+function resetDocFilters() { Object.assign(docFilters, {status: '', source: '', enabled: '', updated_after: null, trained_after: null}) }
 const visibleLibraries = computed(() => libraries.value.filter(l => l.name.includes(keyword.value)))
-const visibleDocuments = computed(() => documents.value.filter(d => d.name.includes(keyword.value)))
+const visibleDocuments = computed(() => documents.value.filter(d => d.name.includes(keyword.value)
+  && (!docFilters.status || d.status === docFilters.status)
+  && (!docFilters.source || (d.source || 'local') === docFilters.source)
+  && (!docFilters.enabled || String(d.enabled) === docFilters.enabled)
+  && (!docFilters.updated_after || (d.updated_at || '').slice(0, 10) >= docFilters.updated_after)
+  && (!docFilters.trained_after || (d.parsed_at || '').slice(0, 10) >= docFilters.trained_after)))
 // 知识列表前端分页（接口一次返回全量，这里按页切片展示）
 const docPage = ref(1)
 const docSize = ref(20)
@@ -37,6 +51,87 @@ const pagedDocuments = computed(() => {
   return visibleDocuments.value.slice(start, start + docSize.value)
 })
 watch(() => keyword.value, () => { docPage.value = 1 })
+watch(docFilters, () => { docPage.value = 1 })
+
+// ===== 批量管理：复选框常显，选中≥1个后激活「批量管理」，下拉选择批量操作（移除需二次确认） =====
+const selectedDocs = ref<LibraryDocument[]>([])
+function onSelectionChange(rows: LibraryDocument[]) { selectedDocs.value = rows }
+function batchCommand(cmd: string | number | object) {
+  if (cmd === 'train') batchTrain()
+  else if (cmd === 'download') batchDownload()
+  else if (cmd === 'remove') batchRemove()
+  else if (cmd === 'tag') openBatchTag()
+}
+
+// 批量打标：合并写入（各文档已有标签保留）
+const batchTagVisible = ref(false)
+const batchTagInput = ref('')
+const batchTags = ref<string[]>([])
+function openBatchTag() {
+  if (!selectedDocs.value.length) return
+  batchTags.value = []; batchTagInput.value = ''
+  batchTagVisible.value = true
+}
+function addBatchTag() {
+  const v = batchTagInput.value.trim()
+  if (!v) return
+  if (!batchTags.value.includes(v)) batchTags.value.push(v)
+  batchTagInput.value = ''
+}
+function removeBatchTag(t: string) { batchTags.value = batchTags.value.filter(x => x !== t) }
+
+// 批量操作逐个执行，单个失败不阻断其余文档
+async function batchTrain() {
+  const targets = selectedDocs.value.filter(d => d.status !== 'PARSING' && d.status !== 'PENDING')
+  if (!targets.length) { ElMessage.warning('所选文档均在解析中或待同步，无法训练'); return }
+  await run(async () => {
+    let ok = 0
+    for (const d of targets) {
+      try { await libraryDocumentAction(selected.value!.id, d.id, 'parse'); ok++ } catch { /* 单个失败不阻断 */ }
+    }
+    await load()
+    const skipped = selectedDocs.value.length - targets.length
+    ElMessage.success(`已对 ${ok}/${targets.length} 个文档发起训练` + (skipped > 0 ? `，${skipped} 个解析中/待同步文档已跳过` : ''))
+  })
+}
+async function batchDownload() {
+  const targets = selectedDocs.value.filter(d => d.status !== 'PENDING')
+  if (!targets.length) { ElMessage.warning('所选文档暂无原文可下载'); return }
+  await run(async () => {
+    let ok = 0
+    for (const d of targets) {
+      try { download(await downloadOriginal(selected.value!.id, d.id), d.name); ok++ } catch { /* 单个失败不阻断 */ }
+    }
+    ElMessage.success(`已下载 ${ok}/${targets.length} 个文档原文`)
+  })
+}
+async function batchRemove() {
+  if (!selectedDocs.value.length) return
+  try { await ElMessageBox.confirm(`将删除所选 ${selectedDocs.value.length} 个文档及其全部分段，删除后不可恢复。是否继续？`, '批量移除', {type: 'warning'}) } catch { return }
+  await run(async () => {
+    let ok = 0
+    for (const d of selectedDocs.value) {
+      try { await deleteLibraryDocument(selected.value!.id, d.id); ok++ } catch { /* 单个失败不阻断 */ }
+    }
+    selectedDocs.value = []
+    await load()
+    ElMessage.success(`已移除 ${ok} 个文档`)
+  })
+}
+async function confirmBatchTag() {
+  if (!batchTags.value.length) { ElMessage.warning('请至少添加一个标签'); return }
+  const targets = selectedDocs.value.slice()
+  await run(async () => {
+    let ok = 0
+    for (const d of targets) {
+      const merged = [...new Set([...(d.tags || []), ...batchTags.value])]
+      try { await setLibraryDocumentTags(selected.value!.id, d.id, merged); ok++ } catch { /* 单个失败不阻断 */ }
+    }
+    batchTagVisible.value = false
+    await load()
+    ElMessage.success(`已为 ${ok}/${targets.length} 个文档添加标签`)
+  })
+}
 const dialog = ref(false)
 const step = ref(0)
 const addKnowledgeVisible = ref(false)
@@ -98,7 +193,7 @@ const libRetrieval = ref<RetrievalSettings>(defaultRetrievalSettings())
 const retrievalPanel = ref<InstanceType<typeof RetrievalSettingsPanel>>()
 // 知识库级解析开关：编辑保存后是否对库内全部文档重新解析（默认关闭，批量操作由用户决定）
 const reparseAll = ref(false)
-const statusLabels: Record<string, string> = {PARSING: '解析中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已停止', UNKNOWN: '状态未知'}
+const statusLabels: Record<string, string> = {PENDING: '待同步', UPLOADED: '已上传', PARSING: '解析中', COMPLETED: '已完成', FAILED: '失败', CANCELLED: '已停止', UNKNOWN: '状态未知'}
 async function run(task: () => Promise<void>) {
   if (busy.value) return
   busy.value = true; error.value = ''
@@ -113,7 +208,14 @@ async function load() {
   } catch (e: any) { error.value = e.message || '加载失败' }
   finally { loading.value = false }
 }
-async function openLibrary(lib: DocumentLibrary) { selected.value = lib; keyword.value = ''; docPage.value = 1; await load() }
+// 列表中点击知识库：跳转独立门户页签（路由驱动），不覆盖知识库列表页签
+function openLibrary(lib: DocumentLibrary) { router.push({ path: `/apply/knowledge-libraries/${lib.id}` }) }
+// 详情页签内选中知识库并加载文档列表；页签标题用知识库名
+async function selectLibrary(lib: DocumentLibrary) {
+  selected.value = lib; keyword.value = ''; resetDocFilters(); docPage.value = 1
+  await load()
+  tabsStore.updateTabTitle(route.path, lib.name)
+}
 const embeddingModels = ref<{id: string; name: string}[]>([])
 const modelError = ref('')
 async function openCreate(lib?: DocumentLibrary) {
@@ -160,7 +262,7 @@ async function save() {
 async function action(doc: LibraryDocument, action: 'parse' | 'stop' | 'refresh') {
   if (!selected.value) return
   if (action === 'parse' && doc.status !== 'FAILED' && doc.status !== 'CANCELLED') {
-    try { await ElMessageBox.confirm('重新解析会清除已有分段及人工修改，并使用知识库当前设置。是否继续？', '重新解析', {type: 'warning'}) } catch { return }
+    try { await ElMessageBox.confirm('重新训练会清除已有分段及人工修改，并使用知识库当前设置。是否继续？', '重新训练', {type: 'warning'}) } catch { return }
   }
   if (action === 'stop') {
     try { await ElMessageBox.confirm('停止解析会清除本次已生成的分段，之后可以重新解析。是否继续？', '停止解析', {type: 'warning'}) } catch { return }
@@ -174,7 +276,6 @@ async function remove(doc: LibraryDocument) {
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
-async function exportLibrary() { await run(async () => download(await exportDocumentLibrary(selected.value!.id), `${selected.value!.name}.zip`)) }
 async function original(doc: LibraryDocument) { await run(async () => download(await downloadOriginal(selected.value!.id, doc.id), doc.name)) }
 function docCommand(cmd: string, doc: LibraryDocument) {
   if (cmd === 'original') original(doc)
@@ -261,6 +362,11 @@ async function poll() {
         const remote = await libraryDocumentAction(id, doc.id, 'refresh')
         if (selected.value?.id === id) Object.assign(doc, remote)
       }
+      // 待同步文档由批处理任务分批推进（PENDING→PARSING→COMPLETED）：
+      // 静默重拉列表以感知状态变化与新入列的文档
+      if (selected.value?.id === id && documents.value.some(d => d.status === 'PENDING')) {
+        documents.value = await listLibraryDocuments(id)
+      }
     }
   } catch { /* Stop polling after a failure; manual refresh remains available. */ return }
   if (!disposed) timer = setTimeout(poll, 5000)
@@ -269,30 +375,23 @@ onMounted(async () => {
   await load()
   if (props.openLibId) {
     const lib = libraries.value.find(l => l.id === props.openLibId)
-    if (lib) await openLibrary(lib)
+    if (lib) await selectLibrary(lib)
   }
   timer = setTimeout(poll, 5000)
 })
 onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
 </script>
 <template>
-  <div class="document-libraries">
+  <div class="kge-page document-libraries">
     <el-alert v-if="error" :title="String(error)" type="error" show-icon @close="error = ''" />
     <div class="content" v-loading="loading">
-      <div class="toolbar">
-        <el-button v-if="selected" link :icon="Back" @click="selected = undefined; keyword = ''; load()">返回</el-button>
-        <el-input v-model="keyword" :prefix-icon="Search" :placeholder="selected ? '搜索文档名称' : '搜索知识库名称'" clearable style="max-width: 320px" />
-        <template v-if="selected">
-          <div class="toolbar-spacer" />
-          <el-button :loading="busy" @click="exportLibrary">导出归档</el-button>
-          <el-button @click="openCreate(selected)">知识库设置</el-button>
-          <el-button v-if="canPublish" :icon="Search" @click="goRetrievalTest">检索测试</el-button>
-        </template>
-        <el-button v-else class="toolbar-create" type="primary" :icon="Plus" @click="openCreate()">创建知识库</el-button>
-        <el-button v-if="selected" type="primary" :icon="Plus" :loading="busy" @click="addKnowledgeVisible = true">添加知识</el-button>
-      </div>
       <template v-if="!selected">
-        <el-table :data="visibleLibraries" empty-text="暂无文档库，点击创建知识库开始">
+        <div class="toolbar">
+          <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索知识库名称" clearable style="max-width: 320px" />
+          <div class="toolbar-spacer" />
+          <el-button type="primary" :icon="Plus" @click="openCreate()">创建知识库</el-button>
+        </div>
+        <el-table :data="visibleLibraries" border empty-text="暂无文档库，点击创建知识库开始">
           <el-table-column label="知识库名称" min-width="240" show-overflow-tooltip><template #default="{row}"><el-button link type="primary" @click="openLibrary(row as DocumentLibrary)">{{ row.name }}</el-button></template></el-table-column>
           <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip />
           <el-table-column prop="document_count" label="文档数" width="90" />
@@ -303,8 +402,96 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         </el-table>
       </template>
       <template v-else>
-        <el-table :data="pagedDocuments" empty-text="暂无文档，请上传文件">
-          <el-table-column label="文档名称" min-width="260" show-overflow-tooltip><template #default="{row}"><el-button link type="primary" :disabled="row.status === 'PARSING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></template></el-table-column>
+        <!-- 库信息页头：图标 + 名称 + 元信息；右侧主操作（对齐参考稿布局） -->
+        <header class="lib-header">
+          <div class="lib-icon"><el-icon :size="20"><FolderOpened /></el-icon></div>
+          <div class="lib-info">
+            <div class="lib-name-row">
+              <span class="lib-name" :title="selected.name">{{ selected.name }}</span>
+              <el-tag size="small" type="info" effect="plain">{{ selected.document_count }} 个文档</el-tag>
+            </div>
+            <div class="lib-meta">
+              <span>{{ selected.creator || '—' }}</span>
+              <span class="meta-sep">|</span>
+              <span class="lib-desc" :title="selected.description">{{ selected.description || '暂无描述' }}</span>
+            </div>
+          </div>
+          <div class="lib-actions">
+            <el-button v-if="canPublish" type="primary" :icon="Search" @click="goRetrievalTest">检索测试</el-button>
+            <el-button @click="openCreate(selected)">设置</el-button>
+          </div>
+        </header>
+        <!-- 工具行：左侧添加知识，右侧搜索（对齐参考稿左右分区） -->
+        <div class="doc-toolbar">
+          <el-button type="primary" :icon="Plus" :loading="busy" @click="addKnowledgeVisible = true">添加知识</el-button>
+          <el-dropdown trigger="click" placement="bottom-start" popper-class="batch-dd" @command="batchCommand">
+            <el-button :disabled="!selectedDocs.length">批量管理<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="train">
+                  <div class="batch-item">
+                    <span class="batch-ico"><el-icon><Document /></el-icon></span>
+                    <span class="batch-txt"><span class="batch-title">训练</span><span class="batch-desc">对所选的文档批量进行训练（解析文档并生成分段）</span></span>
+                  </div>
+                </el-dropdown-item>
+                <el-dropdown-item command="download">
+                  <div class="batch-item">
+                    <span class="batch-ico"><el-icon><Download /></el-icon></span>
+                    <span class="batch-txt"><span class="batch-title">下载</span><span class="batch-desc">对所选的文档批量下载原文</span></span>
+                  </div>
+                </el-dropdown-item>
+                <el-dropdown-item command="remove">
+                  <div class="batch-item">
+                    <span class="batch-ico"><el-icon><Delete /></el-icon></span>
+                    <span class="batch-txt"><span class="batch-title">移除</span><span class="batch-desc">批量移除所选的文档及其全部分段</span></span>
+                  </div>
+                </el-dropdown-item>
+                <el-dropdown-item command="tag">
+                  <div class="batch-item">
+                    <span class="batch-ico"><el-icon><CollectionTag /></el-icon></span>
+                    <span class="batch-txt"><span class="batch-title">打标</span><span class="batch-desc">对所选的文档批量添加标识标签</span></span>
+                  </div>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <div class="toolbar-spacer" />
+          <!-- 3 个核心筛选项直显；漏斗挂更新时间/训练时间的时间筛选弹层 -->
+          <el-select v-model="docFilters.status" clearable placeholder="任务进度" style="width: 120px">
+            <el-option v-for="(label, value) in statusLabels" :key="value" :value="value" :label="label" />
+          </el-select>
+          <el-select v-model="docFilters.source" clearable placeholder="来源" style="width: 110px">
+            <el-option v-for="(label, value) in SOURCE_LABELS" :key="value" :value="value" :label="label" />
+          </el-select>
+          <el-select v-model="docFilters.enabled" clearable placeholder="状态" style="width: 100px">
+            <el-option value="true" label="启用" />
+            <el-option value="false" label="停用" />
+          </el-select>
+          <el-popover placement="bottom-end" :width="300" trigger="click">
+            <template #reference>
+              <el-badge :value="timeFilterCount" :hidden="!timeFilterCount" type="primary">
+                <el-button :icon="Filter" aria-label="时间筛选" />
+              </el-badge>
+            </template>
+            <div class="doc-filter">
+              <div class="filter-field">
+                <span class="filter-label">更新时间</span>
+                <el-date-picker v-model="docFilters.updated_after" type="date" value-format="YYYY-MM-DD" placeholder="该日期及之后更新" />
+              </div>
+              <div class="filter-field">
+                <span class="filter-label">训练时间</span>
+                <el-date-picker v-model="docFilters.trained_after" type="date" value-format="YYYY-MM-DD" placeholder="该日期及之后训练" />
+              </div>
+              <div class="filter-actions">
+                <el-button size="small" @click="resetDocFilters">重置</el-button>
+              </div>
+            </div>
+          </el-popover>
+          <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索文档名称" clearable style="width: 240px" />
+        </div>
+        <el-table :data="pagedDocuments" border empty-text="暂无文档，请上传文件" @selection-change="onSelectionChange">
+          <el-table-column type="selection" width="42" />
+          <el-table-column label="文档名称" min-width="260" show-overflow-tooltip><template #default="{row}"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" /><el-button link type="primary" :disabled="row.status === 'PARSING' || row.status === 'PENDING'" @click="goSegments(row as LibraryDocument)">{{ row.name }}</el-button></div></template></el-table-column>
           <el-table-column label="标签" min-width="220"><template #default="{row}">
             <div class="tag-cell">
               <template v-for="t in truncatedTags(row.tags)" :key="t"><el-tag size="small" effect="plain" type="info">{{ t }}</el-tag></template>
@@ -312,23 +499,23 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
               <el-button link type="primary" size="small" @click="openTagDialog(row as LibraryDocument)">+ 添加</el-button>
             </div>
           </template></el-table-column>
-          <el-table-column label="解析状态" width="155"><template #default="{row}"><el-tag :type="row.status === 'COMPLETED' ? 'success' : row.status === 'FAILED' ? 'danger' : 'info'">{{ statusLabels[row.status] || row.status }}</el-tag><el-progress v-if="row.status === 'PARSING'" :percentage="Math.round(row.progress * 100)" /></template></el-table-column>
+          <el-table-column label="任务进度" width="155"><template #default="{row}"><el-tag :type="row.status === 'COMPLETED' ? 'success' : row.status === 'FAILED' ? 'danger' : row.status === 'PENDING' || row.status === 'UPLOADED' ? 'warning' : 'info'">{{ statusLabels[row.status] || row.status }}</el-tag><el-progress v-if="row.status === 'PARSING'" :percentage="Math.round(row.progress * 100)" /></template></el-table-column>
           <el-table-column prop="chunk_count" label="分段" width="75" />
           <el-table-column label="更新时间" width="180"><template #default="{row}">{{ formatDateTime(row.updated_at) }}</template></el-table-column>
           <el-table-column label="训练时间" width="180"><template #default="{row}">{{ row.parsed_at ? formatDateTime(row.parsed_at) : '-' }}</template></el-table-column>
           <el-table-column label="来源" width="100"><template #default="{row}"><el-tag size="small" :type="row.source === 'dingtalk' ? 'warning' : 'info'">{{ formatSource(row.source) }}</el-tag></template></el-table-column>
           <el-table-column label="状态" width="110"><template #default="{row}"><div class="switch-line"><el-switch :model-value="row.enabled" :disabled="busy || row.status === 'PARSING'" :aria-label="`${row.name}检索状态`" @change="toggleDoc(row as LibraryDocument)" /><span>{{ row.enabled ? '已启用' : '已禁用' }}</span></div></template></el-table-column>
-          <el-table-column label="操作" width="180" fixed="right"><template #default="{row}">
+          <el-table-column label="操作" width="180" fixed="right" class-name="ops-col" label-class-name="ops-col"><template #default="{row}">
             <div class="ops">
               <el-button link type="primary" @click="openDetail(row as LibraryDocument)">详情</el-button>
               <el-button link type="primary" :disabled="row.status === 'PARSING'" @click="openSettings(row as LibraryDocument)">设置</el-button>
-              <el-dropdown trigger="click" @command="(cmd: string) => docCommand(cmd, row as LibraryDocument)">
+              <el-dropdown trigger="click" placement="bottom-end" @command="(cmd: string) => docCommand(cmd, row as LibraryDocument)">
                 <el-button link>更多<el-icon style="margin-left:2px"><ArrowDown /></el-icon></el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item v-if="row.status === 'PARSING'" command="stop" :disabled="busy">停止解析</el-dropdown-item>
-                    <el-dropdown-item v-else command="parse" :disabled="busy">重新解析</el-dropdown-item>
-                    <el-dropdown-item command="original" :disabled="busy">下载原文</el-dropdown-item>
+                    <el-dropdown-item v-else-if="row.status !== 'PENDING'" command="parse" :disabled="busy">重新训练</el-dropdown-item>
+                    <el-dropdown-item command="original" :disabled="busy || row.status === 'PENDING'">下载原文</el-dropdown-item>
                     <el-dropdown-item command="remove" divided style="color:var(--el-color-danger)" :disabled="busy || row.status === 'PARSING'">删除</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
@@ -374,6 +561,17 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
       </div>
       <template #footer><el-button @click="dialog = false">取消</el-button><el-button v-if="step" @click="step = 0">上一步</el-button><el-button v-if="!step" type="primary" :disabled="!form.name.trim()" @click="step = 1">下一步</el-button><el-button v-else type="primary" :loading="busy" @click="save">{{ editingId ? '保存设置' : '创建' }}</el-button></template>
     </el-dialog>
+    <el-dialog v-model="batchTagVisible" title="批量打标" width="440px" :close-on-click-modal="false">
+      <el-input v-model="batchTagInput" placeholder="输入标签后按回车添加" @keydown.enter.prevent="addBatchTag" />
+      <div v-if="batchTags.length" class="batch-tag-list">
+        <el-tag v-for="t in batchTags" :key="t" closable effect="plain" @close="removeBatchTag(t)">{{ t }}</el-tag>
+      </div>
+      <div class="batch-tag-hint">将添加到已选的 {{ selectedDocs.length }} 个文档，各文档已有标签保留</div>
+      <template #footer>
+        <el-button @click="batchTagVisible = false">取消</el-button>
+        <el-button type="primary" :loading="busy" @click="confirmBatchTag">确定</el-button>
+      </template>
+    </el-dialog>
     <el-dialog v-model="tagDialog" :title="`编辑标签 · ${tagDoc?.name || ''}`" width="480px" :close-on-click-modal="false">
       <div class="tag-editor">
         <div v-if="tagDoc?.tags?.length" class="tag-list">
@@ -401,7 +599,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
           <div class="detail-grid">
             <div class="detail-item span2"><span class="detail-label">知识标题</span><span class="detail-value">{{ detailDoc.name }}</span></div>
             <div class="detail-item"><span class="detail-label">知识ID</span><span class="detail-value">{{ detailDoc.id }}</span></div>
-            <div class="detail-item"><span class="detail-label">解析状态</span><el-tag size="small" :type="detailDoc.status === 'COMPLETED' ? 'success' : detailDoc.status === 'FAILED' ? 'danger' : 'info'">{{ statusLabels[detailDoc.status] || detailDoc.status }}</el-tag></div>
+            <div class="detail-item"><span class="detail-label">任务进度</span><el-tag size="small" :type="detailDoc.status === 'COMPLETED' ? 'success' : detailDoc.status === 'FAILED' ? 'danger' : detailDoc.status === 'PENDING' || detailDoc.status === 'UPLOADED' ? 'warning' : 'info'">{{ statusLabels[detailDoc.status] || detailDoc.status }}</el-tag></div>
             <div class="detail-item"><span class="detail-label">来源系统</span><span class="detail-value">{{ formatSource(detailDoc.source) }}</span></div>
             <div class="detail-item"><span class="detail-label">检索权限</span><el-tag size="small" :type="detailDoc.enabled ? 'success' : 'info'">{{ detailDoc.enabled ? '开放' : '受限' }}</el-tag></div>
             <div class="detail-item"><span class="detail-label">创建时间</span><span class="detail-value">{{ formatDateTime(detailDoc.created_at) }}</span></div>
@@ -453,11 +651,47 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
 <style scoped>
 .document-libraries { padding: 24px; }
 p, .hint { color: #909399; font-size: 13px; }
-.content { background: white; padding: 20px; border-radius: 8px; }
+.content { background: white; padding: 20px; border-radius: 8px; flex: 1; min-height: 0; overflow: auto; }
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.toolbar-create { margin-left: auto; }
 .toolbar-spacer { flex: 1; min-width: 12px; }
 .switch-line { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+/* 库信息页头（对齐参考稿）：库图标 + 名称/元信息 + 右侧主操作 */
+.lib-header { display: flex; align-items: center; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--el-border-color-lighter); margin-bottom: 14px; }
+.lib-icon { flex: none; width: 40px; height: 40px; border-radius: 8px; background: var(--el-color-primary-light-9); color: var(--el-color-primary); display: flex; align-items: center; justify-content: center; }
+.lib-info { flex: 1; min-width: 0; }
+.lib-name-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lib-name { font-size: 16px; font-weight: 600; color: #303133; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-meta { margin-top: 2px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: #909399; min-width: 0; }
+.meta-sep { color: var(--el-border-color); }
+.lib-desc { max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-actions { flex: none; }
+/* 库内工具行：左=添加知识，右=搜索 */
+.doc-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+/* 文档过滤器弹层：3 个核心筛选项纵向排列，说明走 label 不占行 */
+.doc-filter { display: flex; flex-direction: column; gap: 12px; }
+.filter-field { display: flex; flex-direction: column; gap: 4px; }
+.filter-field :deep(.el-select) { width: 100%; }
+.filter-field :deep(.el-date-editor) { width: 100%; }
+.filter-label { font-size: 12px; color: var(--el-text-color-secondary); }
+.filter-actions { display: flex; justify-content: flex-end; }
+/* 批量管理下拉（popper 挂 body，需 :global）：图标点缀 + 操作说明 */
+:global(.batch-dd .el-dropdown-menu__item) { height: auto; padding: 9px 14px; line-height: 1.4; }
+:global(.batch-dd .el-dropdown-menu__item:not(.is-disabled):hover),
+:global(.batch-dd .el-dropdown-menu__item:not(.is-disabled):focus) { color: inherit; background-color: var(--el-fill-color-light); }
+:global(.batch-dd .batch-item) { display: flex; align-items: center; gap: 12px; min-width: 320px; }
+:global(.batch-dd .batch-ico) { flex: none; width: 32px; height: 32px; border-radius: 8px; background: var(--el-color-primary-light-9); color: var(--el-color-primary); display: flex; align-items: center; justify-content: center; font-size: 16px; }
+:global(.batch-dd .batch-txt) { display: flex; flex-direction: column; gap: 2px; }
+:global(.batch-dd .batch-title) { font-size: 13px; font-weight: 600; color: var(--el-text-color-primary); }
+:global(.batch-dd .batch-desc) { font-size: 12px; color: var(--el-text-color-secondary); }
+/* 批量管理：按钮间距交给 flex gap，避免与 EP 相邻按钮 margin 叠加 */
+.doc-toolbar :deep(.el-button + .el-button) { margin-left: 0; }
+.batch-tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.batch-tag-hint { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 10px; }
+/* 操作列左侧分隔线（对齐参考稿） */
+.document-libraries :deep(.ops-col) { border-left: 1px solid var(--el-border-color-lighter); }
+/* 文档名称列：类型图标 + 名称 */
+.doc-name-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.file-ico { width: 22px; height: 22px; flex: none; object-fit: contain; }
 .tip-icon { color: #c0c4cc; font-size: 14px; cursor: help; }
 .config-form { margin-top: 24px; }
 .step-segment :deep(.index-settings) { margin-top: 16px; }

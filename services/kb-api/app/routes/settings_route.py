@@ -605,14 +605,16 @@ async def test_rerank_api(body: TestRerankIn, u=Depends(require_role("super_admi
     if not model:
         return {"ok": False, "message": "请先填写模型名"}
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    test_docs = ["这是一条测试文档", "无关内容"]
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.post(
                 api_url,
                 headers=headers,
+                # 与检索链路同构：显式传 top_n，避免「测试通过、实际请求被拒」
                 json={"model": model, "query": "测试",
-                      "documents": ["这是一条测试文档", "无关内容"]},
+                      "documents": test_docs, "top_n": len(test_docs)},
             )
     except Exception:
         return {"ok": False, "message": "无法连接到服务地址（网络不通/超时/DNS 失败），请检查地址"}
@@ -628,13 +630,27 @@ async def test_rerank_api(body: TestRerankIn, u=Depends(require_role("super_admi
             detail = r.text[:120]
         return {"ok": False, "message": f"请求失败（{r.status_code}）：{detail}"}
     try:
-        results = r.json().get("results", [])
-        n = len(results)
+        results = r.json().get("results")
     except Exception:
         return {"ok": False, "message": "响应格式异常，非标准 rerank 返回"}
+    # 与 apply_rerank 的解析口径一致：实际检索要求每条候选都返回
+    # 0～1 的 relevance_score 且 index 唯一有效，测试阶段提前暴露不兼容服务
+    if not isinstance(results, list) or len(results) != len(test_docs):
+        return {"ok": False, "message": f"响应格式异常：应返回 {len(test_docs)} 条 results，实际 {len(results) if isinstance(results, list) else '非数组'}"}
+    seen = set()
+    for item in results:
+        if not isinstance(item, dict):
+            return {"ok": False, "message": "响应格式异常：results 条目结构不正确"}
+        idx = item.get("index")
+        score = item.get("relevance_score")
+        if type(idx) is not int or not 0 <= idx < len(test_docs) or idx in seen:
+            return {"ok": False, "message": "响应格式异常：index 无效或重复"}
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 1:
+            return {"ok": False, "message": "响应格式异常：relevance_score 需为 0～1 的数值"}
+        seen.add(idx)
     latency_ms = int((time.perf_counter() - t0) * 1000)
     return {"ok": True, "latency_ms": latency_ms,
-            "message": f"连接成功，返回 {n} 条重排结果"}
+            "message": f"连接成功，返回 {len(results)} 条重排结果"}
 
 
 def _mask_api_key(val: str) -> str:
@@ -1187,17 +1203,31 @@ async def delete_rerank_profile(profile_id: str,
     return {"ok": True}
 
 
+class RerankEnableIn(BaseModel):
+    # 缺省 true 兼容无 body 的旧调用；false = 关闭当前生效模型（全局不重排）
+    enabled: bool = True
+
+
 @router.put("/rerank-profiles/{profile_id}/enable")
 async def enable_rerank_profile(profile_id: str,
+                                body: RerankEnableIn = RerankEnableIn(),
                                 u=Depends(require_role("super_admin", "admin")),
                                 s: AsyncSession = Depends(get_session)):
-    """启用指定配置，同时禁用其他所有配置（只能生效一条）。"""
+    """启用指定配置为默认生效模型（同时禁用其他，只能生效一条）；
+
+    enabled=false 仅允许关闭当前正生效的配置，关闭后全局检索跳过重排。
+    """
     pid = _safe_uuid(profile_id)
     row = (await s.execute(select(RerankProfile).where(RerankProfile.id == pid))).scalar_one_or_none()
     if not row:
         raise HTTPException(404, "配置不存在")
-    await s.execute(update(RerankProfile).values(enabled=False))
-    row.enabled = True
+    if not body.enabled:
+        if not row.enabled:
+            raise HTTPException(400, "该配置当前未生效，无需关闭")
+        row.enabled = False
+    else:
+        await s.execute(update(RerankProfile).values(enabled=False))
+        row.enabled = True
     await _sync_rerank_settings(s)
     await s.commit()
     return {"ok": True}

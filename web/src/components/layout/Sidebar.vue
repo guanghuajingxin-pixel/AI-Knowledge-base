@@ -2,7 +2,8 @@
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
-import * as Icons from '@element-plus/icons-vue'
+import { ChevronDown, Stamp } from '@lucide/vue'
+import { resolveLucideIcon } from '@/utils/lucide-icons'
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { getMenuVisibility, getSiteBranding } from '@/api/settings'
 import { openParserApiGuide } from '@/utils/api-docs'
@@ -204,7 +205,7 @@ function handleUserCommand(command: string | number | object) {
     <div class="logo" @click="router.push('/chat')">
       <div class="logo-icon">
         <img v-if="siteLogo" :src="siteLogo" alt="站点图标" />
-        <el-icon v-else :size="22" color="#fff"><Icons.Stamp /></el-icon>
+        <el-icon v-else :size="22" color="#fff"><Stamp /></el-icon>
       </div>
       <span v-show="!appStore.sidebarCollapsed" class="logo-text">{{ siteName || '知识治理专家' }}</span>
     </div>
@@ -229,7 +230,7 @@ function handleUserCommand(command: string | number | object) {
             >
               <span class="menu-icon">
                 <el-icon :size="16">
-                  <component :is="(Icons as Record<string, any>)[group.parentIcon]" />
+                  <component :is="resolveLucideIcon(group.parentIcon)" />
                 </el-icon>
               </span>
               <span v-show="!appStore.sidebarCollapsed" class="menu-title">{{ group.parentTitle }}</span>
@@ -238,7 +239,7 @@ function handleUserCommand(command: string | number | object) {
                 class="menu-expand"
                 :class="{ expanded: isGroupExpanded(group.key) }"
               >
-                <Icons.ArrowDown />
+                <ChevronDown />
               </el-icon>
             </div>
             <!-- 子项列表 -->
@@ -254,7 +255,7 @@ function handleUserCommand(command: string | number | object) {
                 >
                   <span class="menu-icon menu-icon--child">
                     <el-icon :size="14">
-                      <component :is="(Icons as Record<string, any>)[child.icon]" />
+                      <component :is="resolveLucideIcon(child.icon)" />
                     </el-icon>
                   </span>
                   <span class="menu-title">{{ child.title }}</span>
@@ -273,7 +274,7 @@ function handleUserCommand(command: string | number | object) {
           >
             <span class="menu-icon">
               <el-icon :size="16">
-                <component :is="(Icons as Record<string, any>)[group.parentIcon]" />
+                <component :is="resolveLucideIcon(group.parentIcon)" />
               </el-icon>
             </span>
             <span v-show="!appStore.sidebarCollapsed" class="menu-title">{{ group.parentTitle }}</span>
@@ -291,7 +292,7 @@ function handleUserCommand(command: string | number | object) {
         >
           <span class="menu-icon">
             <el-icon :size="16">
-              <component :is="(Icons as Record<string, any>)[item.icon]" />
+              <component :is="resolveLucideIcon(item.icon)" />
             </el-icon>
           </span>
           <span v-show="!appStore.sidebarCollapsed" class="menu-title">{{ item.title }}</span>
@@ -313,7 +314,7 @@ function handleUserCommand(command: string | number | object) {
           >
             <span class="menu-icon">
               <el-icon :size="16">
-                <component :is="(Icons as Record<string, any>)[item.icon]" />
+                <component :is="resolveLucideIcon(item.icon)" />
               </el-icon>
             </span>
             <span v-show="!appStore.sidebarCollapsed" class="menu-title">{{ item.title }}</span>
@@ -335,7 +336,7 @@ function handleUserCommand(command: string | number | object) {
           <span v-show="!appStore.sidebarCollapsed" class="menu-title username">
             {{ userStore.userInfo?.username || '用户' }}
           </span>
-          <el-icon v-show="!appStore.sidebarCollapsed" class="menu-expand"><Icons.ArrowDown /></el-icon>
+          <el-icon v-show="!appStore.sidebarCollapsed" class="menu-expand"><ChevronDown /></el-icon>
         </span>
         <template #dropdown>
           <el-dropdown-menu>
@@ -379,7 +380,7 @@ function handleUserCommand(command: string | number | object) {
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: linear-gradient(135deg, #2b6bff, #6d28d9);
+  background: linear-gradient(135deg, var(--app-brand-blue), #6d28d9);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -446,11 +447,11 @@ function handleUserCommand(command: string | number | object) {
 }
 
 .menu-item.active {
-  background: #eef3ff;
+  background: var(--app-blue-50);
 }
 
 .menu-item.active .menu-title {
-  color: #2b6bff;
+  color: var(--app-brand-blue);
   font-weight: 600;
 }
 
@@ -488,7 +489,7 @@ function handleUserCommand(command: string | number | object) {
 }
 
 .menu-item.active .menu-icon {
-  background: #2b6bff;
+  background: var(--app-brand-blue);
   color: #fff;
 }
 
@@ -505,7 +506,7 @@ function handleUserCommand(command: string | number | object) {
 }
 
 .menu-item--parent:hover .menu-expand {
-  color: #2b6bff;
+  color: var(--app-brand-blue);
 }
 
 .submenu {

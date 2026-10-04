@@ -1,5 +1,5 @@
 import request from './request'
-import type { DingTalkDocResult, DingTalkWorkspace, DingTalkNode, KnowledgeSource, KnowledgeSourcePayload } from '@/types/knowledge-center'
+import type { DingTalkDocResult, DingTalkWorkspace, DingTalkNode, KnowledgeSource, KnowledgeSourcePayload, SourceDoc, SourceDocResult } from '@/types/knowledge-center'
 
 /** 钉钉知识库文件列表（读取服务端持久化快照；refresh=true 才后台重新遍历钉钉） */
 export function fetchDingTalkDocuments(params: {
@@ -79,4 +79,27 @@ export function fetchDingtalkFolderSnapshot(sourceId: number) {
   return request.get<unknown, { external_id: string; fetched_at: string | null; count: number; folders: Array<{ node_id: string; path: string }> }>(
     `/knowledge-center/knowledge-sources/${sourceId}/dingtalk-folder-snapshot`,
   )
+}
+
+// ========== 知识中心 · 知识源文档（跨文档库聚合）==========
+
+/** 知识源文档列表：所有来源的知识文档（元数据来自 DB，原件存于 MinIO） */
+export function fetchSourceDocuments(params: {
+  page: number
+  size: number
+  search?: string
+  source?: string
+  tag?: string
+}) {
+  return request.get<unknown, SourceDocResult>('/knowledge-center/source-documents', { params })
+}
+
+/** 知识中心标签筛选选项：文档库全部标签去重计数（按使用数降序） */
+export function fetchSourceDocumentTags() {
+  return request.get<unknown, { items: Array<{ name: string; count: number }> }>('/knowledge-center/source-documents/tags')
+}
+
+/** 编辑知识中心文档：标签 + 过期时间 */
+export function updateSourceDocument(id: string, payload: { tags: string[]; expire_at: string | null }) {
+  return request.put<unknown, SourceDoc>(`/knowledge-center/source-documents/${id}`, payload)
 }

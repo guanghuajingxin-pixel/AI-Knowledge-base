@@ -111,41 +111,6 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(chunks[-1], {'type': 'final', 'result': expected})
             self.assertEqual(prepare.await_count, 2)
 
-    async def test_no_memory_choice_reuses_only_current_question_thread(self):
-        user=SimpleNamespace(id=uuid4(),role='editor'); owned=SimpleNamespace(id=uuid4())
-        with patch('app.services.agent.config.load_agent_config',AsyncMock(return_value={'long_memory_enabled':False})), \
-             patch('app.services.llm_resolver.resolve_llm_config',AsyncMock(return_value={'api_key':'test'})), \
-             patch('app.routes.chat_session_route._get_owned',AsyncMock(return_value=owned)):
-            first=await search._prepare_qa(search.ChatIn(query='问题',session_id='s'),user,self._session())
-            resume=await search._prepare_qa(search.ChatIn(query='继续从钉钉知识库探索',session_id='s',action='continue'),user,self._session())
-            new=await search._prepare_qa(search.ChatIn(query='下一问题',session_id='s'),user,self._session())
-        self.assertEqual(first['thread_id'],resume['thread_id'])
-        self.assertNotEqual(first['thread_id'],new['thread_id'])
-
-    async def test_json_endpoint_returns_pending_choice_instead_of_null(self):
-        async def events(_):
-            yield {'type':'choice_pause','question':'继续吗','options':['继续从钉钉知识库探索','基于知识库内容回答'],
-                   'choice_kind':'dingtalk_opt_in','evidence_summary':'部分制度摘要','confidence':30,'citations':[]}
-        with patch.object(search,'_prepare_qa',AsyncMock(return_value={})), patch.object(search,'_qa_events',events):
-            response=await search.chat(search.ChatIn(query='问题'),SimpleNamespace(id='u'),None)
-        self.assertEqual(response['answer_status'],'awaiting_choice')
-        self.assertEqual(response['answer'],'部分制度摘要')
-        self.assertEqual(response['choice']['confidence'],30)
-
-    async def test_stream_pause_does_not_send_sidecar_cancel(self):
-        app=FastAPI(); app.include_router(search.router)
-        app.dependency_overrides[search.get_principal]=lambda:SimpleNamespace(id='user',role='editor')
-        app.dependency_overrides[search.get_session]=lambda:None
-        async def events(_):
-            yield {'type':'choice_pause','question':'继续吗','choice_kind':'dingtalk_opt_in'}
-        with patch.object(search,'_prepare_qa',AsyncMock(return_value={'thread_id':'t'})), \
-             patch.object(search,'_qa_events',events), \
-             patch('app.services.agent.deerflow_runner.cancel_deerflow_stream',AsyncMock()) as cancel:
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
-                response=await client.post('/api/v1/search/chat/stream',json={'query':'问题'})
-            self.assertIn('choice_pause',response.text)
-            cancel.assert_not_awaited()
-
     async def test_cancel_cannot_cancel_another_users_session(self):
         sleeper = asyncio.create_task(asyncio.sleep(100))
         search._ACTIVE_QA[('owner', 'session')] = sleeper

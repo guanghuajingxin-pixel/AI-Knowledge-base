@@ -53,6 +53,7 @@ class RetrieveIn(BaseModel):
     dataset_ids: list[str] | None = None          # Dify 数据集
     ragflow_dataset_ids: list[str] | None = None   # RAGFlow 数据集
     kb_ids: list[str] | None = None                # 平台本地 ES 知识库
+    doc_library_ids: list[int] | None = None       # 平台文档库（knowledge_libraries，本地分段检索）
     top_k: int = 8
     thread_id: str = ""                            # 问答线程 ID：回溯用户身份以执行脱敏策略
 
@@ -164,7 +165,7 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
     """
     from kb_common.clients import dify_client, ragflow_client
     from kb_common.config import get_settings
-    from kb_common.models import ProcessedDocument, KnowledgeLibrary, KnowledgeSource
+    from kb_common.models import ProcessedDocument, KnowledgeLibrary
 
     settings = get_settings()
     # 运行时写入 lru_cached settings（与问答链路一致）
@@ -175,23 +176,9 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
 
     dataset_ids = list(body.dataset_ids or [])
     ragflow_ids = list(body.ragflow_dataset_ids or [])
-    # 兜底：未显式指定任何检索目标时，优先用知识库抽象层（knowledge_libraries）里
-    # 全部启用的库（platform 决定通道）；抽象层为空时回退知识源注册表（过渡保护）
-    if not dataset_ids and not ragflow_ids and not (body.kb_ids or []):
-        libs = (await s.execute(select(KnowledgeLibrary).where(
-            KnowledgeLibrary.enabled == True,  # noqa: E712
-        ))).scalars().all()
-        for r in libs:
-            if r.library_type in {"document", "material"}:
-                continue  # 项目文档库已本地化（MinerU 解析 + 本地分段），不参与外部引擎检索
-            (dataset_ids if r.platform == "dify" else ragflow_ids).append(r.dataset_id)
-        if not dataset_ids and not ragflow_ids:
-            rows = (await s.execute(select(KnowledgeSource).where(
-                KnowledgeSource.enabled == True,  # noqa: E712
-                KnowledgeSource.source_type.in_(["dify_dataset", "ragflow_dataset"]),
-            ))).scalars().all()
-            for r in rows:
-                (dataset_ids if r.source_type == "dify_dataset" else ragflow_ids).append(r.external_id)
+    doc_library_ids = [int(i) for i in (body.doc_library_ids or []) if i]
+    # 检索目标由问答链路按智能体配置解析后显式传入；全空=不检索
+    # （知识库为智能体的资源配置项，未选择=不使用），不设「全部启用库」兜底
 
     hits: list[dict] = []
     # 检索源级告警：部分库/引擎失败时 fail-soft（不整轮 502），附在响应里供上层感知
@@ -250,6 +237,36 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
             local_hits.append({**h, "content": h.get("text", "") or h.get("content", ""),
                                "document_title": doc.original_filename, "source": "local"})
 
+    # 平台文档库通道（本地分段 + 向量/词项评分）：与 Dify/RAGFlow 并列；
+    # 检索参数缺省时按库级「检索设置」(engine_config.retrieval) 取默认（与检索测试同口径）。
+    # 逐库隔离：单库失败记入告警，不影响其他库与外部引擎结果。
+    if doc_library_ids:
+        from app.services.library_retrieval import search as doc_library_search
+        libs = (await s.execute(select(KnowledgeLibrary).where(
+            KnowledgeLibrary.id.in_(doc_library_ids),
+            KnowledgeLibrary.library_type == "document",
+        ))).scalars().all()
+        for lib in libs:
+            try:
+                rcfg = (lib.engine_config or {}).get("retrieval") or {}
+                lib_hits = await asyncio.wait_for(doc_library_search(
+                    s, lib, body.query,
+                    int(rcfg.get("top_k") or body.top_k),
+                    rcfg.get("mode") or "hybrid",
+                    threshold=float(rcfg.get("score_threshold") or 0.0),
+                    vector_weight=float(rcfg.get("vector_weight") or 0.7),
+                    rerank=bool(rcfg.get("rerank")),
+                    rerank_model_id=str(rcfg["rerank_model_id"]) if rcfg.get("rerank_model_id") else None,
+                ), 60)
+                for h in lib_hits:
+                    local_hits.append({**h, "source": "local",
+                                       "library_id": lib.id, "library_name": lib.name})
+            except Exception as e:  # noqa: BLE001 - 单库失败 fail-soft，附告警供上层感知
+                import logging
+                logging.getLogger(__name__).warning(
+                    "document library %s retrieve failed: %s", lib.id, e)
+                retrieve_warnings.append(f"文档库 {lib.name} 检索失败：{e.__class__.__name__}")
+
     # 富化：为命中的文档附加加工元数据（摘要/标签/类型）
     doc_ids = list({h.get("document_id") for h in hits if h.get("document_id")})
     enriched_meta: dict[str, dict] = {}
@@ -302,6 +319,7 @@ async def internal_kb_retrieve(body: RetrieveIn, s: AsyncSession = Depends(get_s
 
     # 送LLM前脱敏（底线节点）：LLM 不得接触未脱敏明文
     scope_ids = {f"kb:{k}" for k in kb_ids if k}
+    scope_ids |= {f"library:{i}" for i in doc_library_ids}
     libs = (await s.execute(select(KnowledgeLibrary))).scalars().all()
     ds2lib = {r.dataset_id: r.id for r in libs}
     scope_ids |= {f"library:{ds2lib[d]}" for d in list(dataset_ids) + list(ragflow_ids) if d in ds2lib}

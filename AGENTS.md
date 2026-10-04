@@ -126,7 +126,7 @@ ES index naming: `kb_{kb_id}` for document KBs, `faq_{kb_id}` for FAQ KBs.
 
 ## Frontend Design System
 
-**Stack**: Vue 3.4+ (`<script setup lang="ts">`), TypeScript strict, Element Plus 2.x, Vite 5.x, Pinia, Vue Router 4, Axios, `@element-plus/icons-vue`.
+**Stack**: Vue 3.4+ (`<script setup lang="ts">`), TypeScript strict, Element Plus 2.x, Vite 5.x, Pinia, Vue Router 4, Axios, `@lucide/vue`(新代码图标), `@element-plus/icons-vue`(存量).
 
 ### Layout Pattern
 
@@ -138,8 +138,8 @@ The tab bar (`stores/tabs.ts` + `components/layout/TabBar.vue`) maintains open p
 
 | Token | Value | Usage |
 |-------|-------|-------|
-| `--el-color-primary` | `#409EFF` | Primary buttons, links, active states |
-| `--el-color-primary-light-9` | `#ecf5ff` | Selected row bg, tag light bg |
+| `--el-color-primary` | `#2B6BFF` | Primary buttons, links, active states (品牌蓝,见 frontend-dev-spec §3) |
+| `--el-color-primary-light-9` | `#eef3ff` | Selected row bg, tag light bg |
 | `--el-color-success` | `#67c23a` | Status: COMPLETED |
 | `--el-color-warning` | `#e6a23c` | Status: PROCESSING/INDEXING/PARSING |
 | `--el-color-danger` | `#f56c6c` | Delete, status: FAILED |
@@ -185,6 +185,7 @@ API modules in `web/src/api/`:
 - Chinese language interface throughout
 - Match Element Plus conventions: `type="primary"` for create/submit, `type="danger"` for delete, `link` for inline actions
 - `v-loading` directive on async areas, `el-empty` for empty states, `ElMessage.success/error()` for CUD feedback
+- 前端统一开发规范（**强制**）：[docs/frontend-dev-spec.md](docs/frontend-dev-spec.md) —— 图标体系（新代码统一 `@lucide/vue` 具名导入、动态图标走 `utils/lucide-icons.ts` 注册表）、蓝色设计 Token（品牌主色 `#2B6BFF`）、TS 风格与工程门禁、AI Coding 约定；与 ui-guidelines.md 冲突时以本文件为准。
 
 ### 表格与弹窗布局要求
 
@@ -194,6 +195,7 @@ API modules in `web/src/api/`:
 - 单个开关仅展示当前状态文案，避免同时铺开开启和关闭标签；控件与文案应保持同一行，并提供可访问名称。
 - 弹窗内表格需核对可用宽度与列宽总和。交付布局调整前检查长中文名称、开关两种状态、空数据及说明文字，避免控件换行、文字挤压和无意义留白。
 - 列表「操作」列外显按钮最多 3 个（按使用频率选取），其余收进「更多」下拉，触发器以 `…` 图标表示；危险操作（删除等）归入「更多」并保留二次确认。按钮文案动词开头、明确动作（如「下载原文」而非「原文」）。
+- 列表页统一范式（**强制**）：[docs/frontend-dev-spec.md §1.5](docs/frontend-dev-spec.md) —— 四段式结构（过滤栏/工具栏/表格/分页）、表格开启 `border` 支持表头拖拽调整列宽、过滤栏「查询/重置」按钮组 `margin-left: auto` 靠右、分页统一 KgPagination、操作按钮 `link + size="small"`；新增列表页必须照范式实现，参照 KnowledgeCenter.vue 与 DocumentLibraries.vue。
 
 ## .env Configuration
 

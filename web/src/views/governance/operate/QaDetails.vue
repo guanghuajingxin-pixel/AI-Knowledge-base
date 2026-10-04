@@ -31,8 +31,10 @@
           <el-option label="无反馈" value="none" />
         </el-select>
       </div>
-      <el-button type="primary" @click="onSearch">查询</el-button>
-      <el-button @click="onReset">重置</el-button>
+      <div class="filter-actions">
+        <el-button type="primary" @click="onSearch">查询</el-button>
+        <el-button @click="onReset">重置</el-button>
+      </div>
     </div>
 
     <!-- 块状列表 -->
@@ -268,6 +270,8 @@ onMounted(load)
 }
 .filter-item { display: flex; align-items: center; gap: 8px; }
 .filter-label { font-size: 13.5px; color: #4B5563; white-space: nowrap; }
+.filter-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+.filter-actions .el-button + .el-button { margin-left: 0; }
 
 .qa-list { display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; overflow-y: auto; }
 .empty-box { text-align: center; padding: 60px 0; color: #9CA3AF; }

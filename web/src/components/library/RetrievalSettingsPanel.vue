@@ -16,16 +16,30 @@ const props = withDefaults(defineProps<{ value?: RetrievalSettings | null }>(), 
 const collapsed = ref(false)
 const form = reactive<RetrievalSettings>(defaultRetrievalSettings())
 const rerankProfiles = ref<RerankProfile[]>([])
+/** 只能选择「模型配置」中已生效（默认）的 Rerank 模型 */
+const enabledProfiles = computed(() => rerankProfiles.value.filter(p => p.enabled))
 
 // Score 阈值开关：关闭 = 0（不过滤），开启恢复上次非零值（本地态，不落库）
 const thresholdOn = ref(false)
 const lastThreshold = ref(0.3)
+
+function sanitizeRerankModel() {
+  // 已保存的模型被停用/删除时清空无效选择，避免检索实际命中已停用配置
+  if (form.rerank_model_id && !enabledProfiles.value.some(p => p.id === form.rerank_model_id)) {
+    form.rerank_model_id = ''
+  }
+  // 已开启 Rerank 且仅一个生效模型时自动选中（与手动开启开关行为一致）
+  if (form.rerank && !form.rerank_model_id && enabledProfiles.value.length === 1) {
+    form.rerank_model_id = enabledProfiles.value[0].id
+  }
+}
 
 function init(s?: RetrievalSettings | null) {
   Object.assign(form, s ? {...defaultRetrievalSettings(), ...s} : defaultRetrievalSettings())
   collapsed.value = false
   thresholdOn.value = form.score_threshold > 0
   lastThreshold.value = form.score_threshold > 0 ? form.score_threshold : 0.3
+  sanitizeRerankModel()
 }
 
 // 每次打开/切换传入新的设置对象即重新初始化
@@ -33,7 +47,16 @@ watch(() => props.value, v => init(v), {immediate: true})
 
 onMounted(async () => {
   try { rerankProfiles.value = await listRerankProfiles() } catch { /* 模型列表不可用仅影响下拉选项 */ }
+  sanitizeRerankModel()
 })
+
+// 开启 Rerank：仅有一个生效模型时自动选中，减少一次操作
+function turnRerankOn() {
+  form.rerank = true
+  if (!form.rerank_model_id && enabledProfiles.value.length === 1) {
+    form.rerank_model_id = enabledProfiles.value[0].id
+  }
+}
 
 const modes = [
   {key: 'hybrid', title: '混合检索', icon: Connection,
@@ -94,7 +117,7 @@ defineExpose({getSettings})
               <el-radio :model-value="!form.rerank" value="on" class="mode-radio" aria-label="权重设置">{{ '' }}</el-radio>
             </div>
             <div class="sub-card" :class="{active: form.rerank}" role="radio" :aria-checked="form.rerank"
-                 tabindex="0" @click="form.rerank = true" @keydown.enter.prevent="form.rerank = true">
+                 tabindex="0" @click="turnRerankOn" @keydown.enter.prevent="turnRerankOn">
               <span class="sub-main">
                 <span class="sub-title">Rerank 模型</span>
                 <span class="sub-desc">根据候选分段与问题的语义匹配度重新排序，改进语义排序结果</span>
@@ -109,10 +132,12 @@ defineExpose({getSettings})
             <span class="weight-label">关键词 {{ keywordWeight.toFixed(2) }}</span>
           </div>
           <div v-else class="rerank-row">
-            <el-select v-model="form.rerank_model_id" filterable clearable class="rerank-select" placeholder="选择 Rerank 模型" aria-label="Rerank 模型">
-              <el-option v-for="p in rerankProfiles" :key="p.id" :label="`${p.name}（${p.model}）`" :value="p.id" />
+            <el-select v-model="form.rerank_model_id" filterable clearable class="rerank-select"
+                       :placeholder="enabledProfiles.length ? '选择已生效的 Rerank 模型' : '暂无已生效的 Rerank 模型'"
+                       aria-label="Rerank 模型">
+              <el-option v-for="p in enabledProfiles" :key="p.id" :label="`${p.name}（${p.model}）`" :value="p.id" />
             </el-select>
-            <span class="rerank-hint">未选择时使用「模型配置」中的全局 Rerank 配置</span>
+            <span class="rerank-hint">仅可选择「模型配置」中已生效的模型；未选择时使用全局生效模型</span>
           </div>
         </div>
 
@@ -121,10 +146,12 @@ defineExpose({getSettings})
           <div class="exp-row">
             <span class="exp-label">Rerank 模型<el-tooltip content="开启后按候选分段与问题的语义匹配度重排" placement="top"><el-icon class="tip-icon"><QuestionFilled /></el-icon></el-tooltip></span>
             <div class="rerank-inline">
-              <el-switch v-model="form.rerank" aria-label="Rerank 模型开关" />
+              <el-switch :model-value="form.rerank" aria-label="Rerank 模型开关" @change="(v) => v ? turnRerankOn() : (form.rerank = false)" />
               <el-select v-model="form.rerank_model_id" filterable clearable :disabled="!form.rerank"
-                         class="rerank-select" placeholder="选择 Rerank 模型" aria-label="Rerank 模型">
-                <el-option v-for="p in rerankProfiles" :key="p.id" :label="`${p.name}（${p.model}）`" :value="p.id" />
+                         class="rerank-select"
+                         :placeholder="enabledProfiles.length ? '选择已生效的 Rerank 模型' : '暂无已生效的 Rerank 模型'"
+                         aria-label="Rerank 模型">
+                <el-option v-for="p in enabledProfiles" :key="p.id" :label="`${p.name}（${p.model}）`" :value="p.id" />
               </el-select>
             </div>
           </div>

@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,7 +34,15 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     kkfv_url: str = "http://127.0.0.1:8012"
 
-    # 认证
+    # 认证：切换后本地密码/钉钉登录停止签发 JWT，避免绕过统一认证。
+    auth_provider: Literal["local", "keycloak"] = "local"
+    oidc_issuer: str = ""
+    oidc_jwks_url: str = ""  # 可选容器内 JWKS URL；issuer 仍严格按公网地址校验
+    oidc_audience: str = "kb-api"
+    oidc_portal_client_id: str = "jack-portal"
+    oidc_web_client_id: str = "knowledge-web"
+    oidc_api_clients: list[str] = Field(default_factory=list)  # JSON 数组；平台机器客户端白名单
+    oidc_token_url: str = ""  # 可选内部 token endpoint，绝不从调用方输入推导
     jwt_secret: str = "change-me-in-prod"
     jwt_algo: str = "HS256"
     jwt_ttl_minutes: int = 1440
@@ -122,6 +131,11 @@ class Settings(BaseSettings):
     # 单文档解析/索引等待上限：默认 7 天，避免 RAGFlow/Dify 长解析被 600s 截断。
     sync_indexing_timeout_seconds: int = Field(default=604800, ge=1)
     sync_default_delete_policy: str = "keep"   # keep | sync
+    # library 后端批处理模式：编目（预建任务/文档）后由全局批处理作业分批消费。
+    sync_batch_size: int = Field(default=5, ge=1, le=50)   # 每批处理任务数
+    sync_batch_cron: str = "0/30 * * * * ?"   # 批处理作业 cron（Quartz 6 段，含秒位；5 段 crontab 注册时自动转换）
+    sync_batch_stale_run_seconds: int = Field(default=21600, ge=600)  # batch run 无推进收编阈值（6h）
+    sync_batch_running_reclaim_seconds: int = Field(default=1800, ge=60)  # running 任务卡死自愈阈值（30min）
 
     # 定时同步调度：XXL-Job 调度中心（替代内置 APScheduler）。
     # enabled=true 时 admin 不可达启动即报错（fail fast）；显式置 false 则定时同步整体关闭。

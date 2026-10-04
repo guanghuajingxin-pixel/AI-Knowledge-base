@@ -423,11 +423,14 @@ def sync_source_now(source_id: int, u=Depends(require_role("super_admin", "admin
         raise HTTPException(status_code=404, detail="同步源不存在")
     if not source.enabled:
         raise HTTPException(status_code=409, detail="同步源已停用，启用后才可立即同步")
-    running = db.query(SyncRun.id).filter(
-        SyncRun.source_id == source_id, SyncRun.status == "running",
-    ).first()
-    if running:
-        raise HTTPException(status_code=409, detail="该同步源正在运行，请在运行监控中查看结果")
+    is_library = (source.backend_type or "").strip().lower() == "library"
+    if not is_library:
+        # library 源走编目+批处理：批处理进行中（running run）允许再次编目（内部按队列跳过）
+        running = db.query(SyncRun.id).filter(
+            SyncRun.source_id == source_id, SyncRun.status == "running",
+        ).first()
+        if running:
+            raise HTTPException(status_code=409, detail="该同步源正在运行，请在运行监控中查看结果")
     from app.services.sync.scheduler import trigger_source_sync
     from app.services.sync.xxljob_admin import XxlJobAdminError
     try:
@@ -724,16 +727,24 @@ def list_tasks(tab: str = Query("done"), status: str = "", source_id: int | None
 @router.post("/tasks/batch-retry",
              dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
 def batch_retry_tasks(payload: SyncTaskBatchIn, db=Depends(get_sync_db)):
-    """批量重试：仅失败且带节点信息的任务可重试；同步源正在运行的跳过。"""
+    """批量重试：仅失败且带节点信息的任务可重试；同步源正在运行的跳过。
+
+    library 批处理模式的源不因 running run 被跳过（重入队与批处理并发安全）。
+    """
     from app.services.sync.task_retry import submit_task_retry
     tasks = db.query(SyncTask).filter(SyncTask.id.in_(payload.ids)).all()
     running_sources = {r[0] for r in
                        db.query(SyncRun.source_id).filter(SyncRun.status == "running").all()}
+    library_sources = {r[0] for r in
+                       db.query(SyncSource.id).filter(
+                           SyncSource.backend_type == "library").all()}
     submitted = 0
     skipped = 0
     for task in tasks:
+        # library 批处理模式任务重入队与批处理并发安全，不因 running run 被跳过
+        is_library = bool(task.library_document_id) or (task.source_id in library_sources)
         if task.status == "failed" and task.node_id and task.source_id is not None \
-                and task.source_id not in running_sources:
+                and (is_library or task.source_id not in running_sources):
             submit_task_retry(task.id)
             submitted += 1
         else:
@@ -769,10 +780,16 @@ def retry_task(task_id: int, db=Depends(get_sync_db)):
         raise HTTPException(status_code=409, detail="仅失败任务可重试")
     if not task.node_id or task.source_id is None:
         raise HTTPException(status_code=409, detail="任务缺少钉钉节点或同步源信息，无法重试")
-    running = db.query(SyncRun.id).filter(
-        SyncRun.source_id == task.source_id, SyncRun.status == "running").first()
-    if running:
-        raise HTTPException(status_code=409, detail="该同步源正在同步中，请等待结束后再重试")
+    # library 批处理模式任务重入队与批处理并发安全，不因 running run 拒绝
+    is_library = bool(task.library_document_id)
+    if not is_library and task.source_id is not None:
+        source = db.get(SyncSource, task.source_id)
+        is_library = source is not None and (source.backend_type or "").strip().lower() == "library"
+    if not is_library:
+        running = db.query(SyncRun.id).filter(
+            SyncRun.source_id == task.source_id, SyncRun.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409, detail="该同步源正在同步中，请等待结束后再重试")
     submit_task_retry(task_id)
     return {"ok": True, "message": "重试已提交，队列稍后刷新可见结果"}
 

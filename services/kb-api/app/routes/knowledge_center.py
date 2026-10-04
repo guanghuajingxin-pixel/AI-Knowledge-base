@@ -7,14 +7,15 @@ import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func, case, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Literal
 from kb_common.database import get_session
 from kb_common.models import (
     KnowledgeBase, Directory, Document, User, KnowledgeSource, DingtalkFileSnapshot,
-    DingtalkFolderStat, DingtalkFileReview,
+    DingtalkFolderStat, DingtalkFileReview, KnowledgeLibrary, LibraryDocument,
+    SyncDocumentMapping, SyncSource,
 )
 from kb_common.clients import es_client
 from app.schemas import (
@@ -1020,3 +1021,154 @@ async def get_dingtalk_folder_snapshot(
         "count": len(rows),
         "folders": [{"node_id": r.node_id, "path": r.path} for r in rows],
     }
+
+
+# ========== 知识中心 · 知识源文档（跨文档库聚合）==========
+
+_DT_NODE_URL = "https://alidocs.dingtalk.com/i/nodes/{node_id}"
+
+
+async def _dingtalk_fallback(s: AsyncSession, doc_ids: list[str]) -> dict[str, dict]:
+    """存量钉钉文档缺失固化来源信息时的兜底：SyncDocumentMapping 反查 node_id，
+    再经 SyncSource → KnowledgeSource 解析知识库名称（仅响应补全，不写库）。"""
+    mappings = (await s.execute(
+        select(SyncDocumentMapping)
+        .where(SyncDocumentMapping.dify_document_id.in_(doc_ids)))).scalars().all()
+    if not mappings:
+        return {}
+    src_rows = (await s.execute(
+        select(SyncSource).where(SyncSource.id.in_({m.source_id for m in mappings})))).scalars().all()
+    ws_ids = {sr.workspace_id for sr in src_rows if sr.workspace_id}
+    ws_names: dict[str, str] = {}
+    if ws_ids:
+        ks_rows = (await s.execute(
+            select(KnowledgeSource).where(
+                KnowledgeSource.source_type == "dingtalk_workspace",
+                KnowledgeSource.external_id.in_(ws_ids)))).scalars().all()
+        ws_names = {ks.external_id: ks.name for ks in ks_rows}
+    out: dict[str, dict] = {}
+    for m in mappings:
+        if not m.node_id:
+            continue
+        out[m.dify_document_id] = {
+            "source_url": _DT_NODE_URL.format(node_id=m.node_id),
+            "source_workspace_name": ws_names.get(
+                next((sr.workspace_id for sr in src_rows if sr.id == m.source_id), ""), None),
+        }
+    return out
+
+
+def _source_doc_out(doc: LibraryDocument, library_name: str, extra: dict | None = None) -> dict:
+    extra = extra or {}
+    return {
+        "id": str(doc.id), "name": doc.name, "tags": doc.tags or [],
+        "source": doc.source, "status": doc.status, "size": doc.size,
+        "library_id": doc.library_id, "library_name": library_name,
+        "updated_by": doc.updated_by, "expire_at": _to_utc_iso(doc.expire_at),
+        "updated_at": _to_utc_iso(doc.updated_at),
+        "source_url": (doc.source_url if doc.source == "dingtalk" else None) or extra.get("source_url"),
+        "source_workspace_name": (doc.source_workspace_name if doc.source == "dingtalk" else None)
+        or extra.get("source_workspace_name"),
+    }
+
+
+@router.get("/source-documents/tags")
+async def list_source_document_tags(
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """知识中心标签筛选选项：文档库全部标签去重计数（unnest 聚合，按使用数降序）。"""
+    sub = (select(func.unnest(LibraryDocument.tags).label("tag"))
+           .join(KnowledgeLibrary, LibraryDocument.library_id == KnowledgeLibrary.id)
+           .where(KnowledgeLibrary.library_type == "document")).subquery()
+    rows = (await s.execute(
+        select(sub.c.tag.label("tag"), func.count().label("count"))
+        .group_by(sub.c.tag).order_by(func.count().desc(), sub.c.tag))).all()
+    return {"items": [{"name": r.tag, "count": r.count} for r in rows]}
+
+
+@router.get("/source-documents")
+async def list_source_documents(
+    search: str | None = Query(None, description="按知识标题模糊搜索"),
+    source: str | None = Query(None, description="来源筛选：local | dingtalk"),
+    tag: str | None = Query(None, description="标签筛选（命中任一标签即返回）"),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """知识中心文档列表：跨文档库聚合所有来源的知识源文档（原件存于 MinIO raw-docs）。
+
+    钉钉来源（source=dingtalk）返回固化入库的在线文档链接与知识库名称
+    （source_url / source_workspace_name）；迁移 0051 之前的存量文档由
+    SyncDocumentMapping 反查兜底。本接口只读元数据库，不调钉钉。
+    """
+    q = (select(LibraryDocument, KnowledgeLibrary.name.label("library_name"))
+         .join(KnowledgeLibrary, LibraryDocument.library_id == KnowledgeLibrary.id)
+         .where(KnowledgeLibrary.library_type == "document"))
+    if source in ("local", "dingtalk"):
+        q = q.where(LibraryDocument.source == source)
+    if tag and tag.strip():
+        q = q.where(LibraryDocument.tags.any(tag.strip()))
+    if search and search.strip():
+        q = q.where(LibraryDocument.name.ilike(f"%{search.strip()}%"))
+    total = (await s.execute(select(func.count()).select_from(q.subquery()))).scalar_one()
+    rows = (await s.execute(
+        q.order_by(LibraryDocument.updated_at.desc(), LibraryDocument.created_at.desc())
+        .offset((page - 1) * size).limit(size))).all()
+
+    fallback = await _dingtalk_fallback(
+        s, [str(doc.id) for doc, _ in rows
+            if doc.source == "dingtalk" and (not doc.source_url or not doc.source_workspace_name)])
+    return {"items": [_source_doc_out(doc, lib_name,
+                                      fallback.get(str(doc.id)) if doc.source == "dingtalk" else None)
+                      for doc, lib_name in rows],
+            "total": total}
+
+
+class SourceDocUpdateIn(BaseModel):
+    """知识中心文档编辑：标签（与库内 DocumentTagsIn 同口径校验）+ 过期时间。"""
+    tags: list[str] = Field(default_factory=list, max_length=32)
+    expire_at: str | None = Field(None, description="过期时间（ISO 日期），空串或 null 表示清除")
+
+    @field_validator("tags")
+    @classmethod
+    def _trim(cls, v):
+        cleaned = [t.strip() for t in v if t and t.strip()]
+        seen, out = set(), []
+        for t in cleaned:
+            short = t[:64]
+            if short not in seen:
+                seen.add(short)
+                out.append(short)
+        if len(out) > 32:
+            raise ValueError("标签最多 32 个")
+        return out
+
+
+@router.put("/source-documents/{doc_id}",
+            dependencies=[Depends(require_role("super_admin", "admin", "editor"))])
+async def update_source_document(
+    doc_id: _uuid.UUID,
+    body: SourceDocUpdateIn,
+    u=Depends(get_current_user),
+    s: AsyncSession = Depends(get_session),
+):
+    """编辑知识中心文档元数据：标签与过期时间（更新人记录为当前登录用户）。"""
+    doc = await s.get(LibraryDocument, doc_id)
+    if doc is None:
+        raise HTTPException(404, "文档不存在")
+    doc.tags = body.tags
+    raw_expire = (body.expire_at or "").strip()
+    if raw_expire:
+        try:
+            doc.expire_at = datetime.fromisoformat(raw_expire)
+        except ValueError:
+            raise HTTPException(422, "过期时间格式无效，应为日期或日期时间")
+    else:
+        doc.expire_at = None
+    doc.updated_by = u.username
+    await s.commit()
+    await s.refresh(doc)
+    lib = await s.get(KnowledgeLibrary, doc.library_id)
+    return _source_doc_out(doc, lib.name if lib else "")

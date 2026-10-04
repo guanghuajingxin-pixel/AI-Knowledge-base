@@ -19,8 +19,10 @@
         <el-option label="已解决" value="resolved" />
         <el-option label="已关闭" value="closed" />
       </el-select>
-      <el-button type="primary" @click="onSearch">查询</el-button>
-      <el-button @click="onReset">重置</el-button>
+      <div class="filter-actions">
+        <el-button type="primary" @click="onSearch">查询</el-button>
+        <el-button @click="onReset">重置</el-button>
+      </div>
     </div>
 
     <!-- 工单表格：撑满剩余高度，表体内部滚动（kge-fill 约定） -->
@@ -222,6 +224,8 @@ onMounted(load)
   padding: 14px 16px; margin-bottom: 14px;
   flex-shrink: 0;
 }
+.filter-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+.filter-actions .el-button + .el-button { margin-left: 0; }
 .table-fill { flex: 1; min-height: 0; }
 .corr-table {
   background: #fff; border-radius: 10px; border: 1px solid var(--line, #E5E7EB);

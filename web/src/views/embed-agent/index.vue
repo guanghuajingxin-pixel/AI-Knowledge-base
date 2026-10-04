@@ -52,7 +52,7 @@ watch(() => props.platform, loadConfig)
   <div class="embed-agent-page">
     <!-- 配置加载中 -->
     <div v-if="loading" class="embed-mask">
-      <el-icon class="is-loading" :size="28" color="#2b6bff"><Loading /></el-icon>
+      <el-icon class="is-loading" :size="28" color="var(--app-brand-blue)"><Loading /></el-icon>
       <span class="mask-text">正在加载 {{ title }} 智能问答…</span>
     </div>
 
@@ -81,7 +81,7 @@ watch(() => props.platform, loadConfig)
     <!-- 嵌入页面 -->
     <template v-else>
       <div v-if="frameLoading" class="embed-mask">
-        <el-icon class="is-loading" :size="28" color="#2b6bff"><Loading /></el-icon>
+        <el-icon class="is-loading" :size="28" color="var(--app-brand-blue)"><Loading /></el-icon>
         <span class="mask-text">正在加载 {{ title }} 智能问答…</span>
       </div>
       <iframe

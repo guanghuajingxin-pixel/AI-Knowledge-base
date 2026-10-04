@@ -664,11 +664,11 @@ onMounted(async () => {
   color: #303133;
 }
 
-.stat-dingtalk { color: #2b6bff; }
+.stat-dingtalk { color: var(--app-brand-blue); }
 .stat-dify { color: #67c23a; }
 .stat-ragflow { color: #f56c6c; }
 .stat-business { color: #e6a23c; }
-.stat-enabled { color: #2b6bff; }
+.stat-enabled { color: var(--app-brand-blue); }
 
 .stat-label {
   font-size: 12px;

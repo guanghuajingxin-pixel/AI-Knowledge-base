@@ -1,0 +1,30 @@
+:root:root {
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--el-text-color-primary);
+  font-synthesis: none;
+  --app-brand-blue: #2b6bff;
+  --app-blue-50: #eef3ff;
+  --app-blue-100: #dde7ff;
+  --app-blue-200: #bfd3ff;
+  --app-blue-600: #2760e6;
+  --app-blue-900: #1a4099;
+  --app-canvas: #f5f7fa;
+  --app-white: #ffffff;
+  --app-ink: #303133;
+  --app-shadow: 0 12px 40px rgb(43 107 255 / 7%);
+  --el-color-primary: var(--app-brand-blue);
+  --el-color-primary-light-3: #6090ff;
+  --el-color-primary-light-5: #80a6ff;
+  --el-color-primary-light-7: var(--app-blue-200);
+  --el-color-primary-light-8: var(--app-blue-100);
+  --el-color-primary-light-9: var(--app-blue-50);
+  --el-color-primary-dark-2: #2256cc;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--app-canvas); }
+button, textarea, input { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+button { cursor: pointer; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--app-brand-blue); outline-offset: 4px; }
+a { color: var(--app-brand-blue); text-decoration: none; }
+.el-icon svg { width: 1em; height: 1em; }

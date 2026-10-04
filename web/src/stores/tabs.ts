@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 export interface Tab {
@@ -107,11 +107,30 @@ export const useTabsStore = defineStore('tabs', () => {
     { deep: true },
   )
 
+  // 页签级组件缓存（AppLayout 的 KeepAlive include 数据源）：
+  // 记录每个页签路径对应的页面组件名（懒加载组件首次渲染后由 vue-router 回写到 route 记录上）。
+  // 页签开着 → 组件名在 include 内 → 切换页签组件不销毁，进行中的检索/流式等事务不中断；
+  // 页签关闭 → 组件名移出 include → 缓存随之释放，重新打开恢复全新挂载。
+  const componentNames = ref<Record<string, string>>({})
+  const cacheNames = computed(() => {
+    const names = new Set<string>()
+    for (const t of tabs.value) {
+      const name = componentNames.value[t.path]
+      if (name) names.add(name)
+    }
+    return [...names]
+  })
+
   // Auto-add tabs on route change
   watch(
     () => route.path,
     (path) => {
       if (path === '/' || path === '/login') return
+      // 记录该路径的页面组件名（KeepAlive 按组件名匹配缓存）
+      const leaf = route.matched[route.matched.length - 1]
+      const comp = leaf?.components?.default as { name?: string; __name?: string } | undefined
+      const name = comp?.name || comp?.__name
+      if (name) componentNames.value[path] = name
       // Find matched route to get title
       const matched = route.matched.filter((r) => r.meta?.title)
       const title = matched.length > 0 ? (matched[matched.length - 1].meta!.title as string) : path
@@ -120,5 +139,5 @@ export const useTabsStore = defineStore('tabs', () => {
     { immediate: true },
   )
 
-  return { tabs, addTab, updateTabTitle, assignSequentialTitle, removeTab, closeOthers, closeAll }
+  return { tabs, cacheNames, addTab, updateTabTitle, assignSequentialTitle, removeTab, closeOthers, closeAll }
 })

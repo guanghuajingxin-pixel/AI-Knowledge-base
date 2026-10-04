@@ -92,3 +92,32 @@ export interface KnowledgeSourcePayload {
   config?: Record<string, any> | null
   enabled?: boolean
 }
+
+/** 知识中心文档（跨文档库聚合的知识源文档，原件存于 MinIO） */
+export interface SourceDoc {
+  id: string
+  name: string
+  tags: string[]
+  /** local=手动上传 | dingtalk=钉钉知识库 */
+  source: 'local' | 'dingtalk'
+  status: string
+  size: number
+  library_id: number
+  library_name: string
+  /** 更新人：手动上传=操作用户，钉钉同步=同步触发人 */
+  updated_by: string | null
+  /** 过期时间（UTC ISO，null 未设置） */
+  expire_at: string | null
+  /** 更新时间（UTC ISO） */
+  updated_at: string | null
+  /** 钉钉在线文档链接（仅 source=dingtalk，标题超链接跳转用） */
+  source_url: string | null
+  /** 钉钉知识库名称（仅 source=dingtalk，来源系统展示用） */
+  source_workspace_name: string | null
+}
+
+/** 知识中心文档列表查询结果 */
+export interface SourceDocResult {
+  items: SourceDoc[]
+  total: number
+}

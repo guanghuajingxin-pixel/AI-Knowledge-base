@@ -3,20 +3,22 @@ import { ref } from 'vue'
 import type { UserInfo, LoginRequest, LoginResponse } from '@/types/user'
 import { login as loginApi, getUserInfo } from '@/api/auth'
 import { clearDingtalkOAuthState } from '@/utils/dingtalk-auth'
+import { sso } from '@/auth/session'
 
 export const useUserStore = defineStore('user', () => {
-  const token = ref<string>(localStorage.getItem('kb_token') || '')
+  const token = ref<string>(sso.isSso ? '' : localStorage.getItem('kb_token') || '')
   const userInfo = ref<UserInfo | null>(null)
 
   function setToken(t: string) {
     token.value = t
-    localStorage.setItem('kb_token', t)
+    if (!sso.isSso) localStorage.setItem('kb_token', t)
+    else localStorage.removeItem('kb_token')
   }
 
   /** 整体替换用户信息并持久化（传 null 等价于清除缓存） */
   function setUserInfo(u: UserInfo | null) {
     userInfo.value = u
-    if (u) localStorage.setItem('kb_user', JSON.stringify(u))
+    if (u && !sso.isSso) localStorage.setItem('kb_user', JSON.stringify(u))
     else localStorage.removeItem('kb_user')
   }
 
@@ -45,16 +47,18 @@ export const useUserStore = defineStore('user', () => {
     return res
   }
 
-  function logout() {
+  function logout(endSso = true) {
     token.value = ''
     userInfo.value = null
     localStorage.removeItem('kb_token')
     localStorage.removeItem('kb_user')
     // 未消费完的钉钉扫码 state 一并清掉，避免下次回调误判
     clearDingtalkOAuthState()
+    if (endSso && sso.isSso) void sso.logout()
   }
 
   function restoreUser() {
+    if (sso.isSso) return
     const cached = localStorage.getItem('kb_user')
     if (cached) {
       userInfo.value = JSON.parse(cached)

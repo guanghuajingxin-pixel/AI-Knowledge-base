@@ -9,7 +9,7 @@ import { listKnowledgeSources } from '@/api/knowledge-center'
 
 const user = useUserStore()
 const canEdit = computed(() => ['admin', 'super_admin', 'editor'].includes(user.userInfo?.role || ''))
-const filters = reactive<GapFilters>({ document_state: 'all', document_count: '', folder_count: '' })
+const filters = reactive<GapFilters>({ path: '', document_state: 'all', document_count: '', folder_count: '' })
 const rows = ref<KnowledgeGap[]>([])
 // 知识库下拉选项：来自知识源管理注册表，只取已启用的钉钉知识库（value 为知识库 external_id）
 const kbs = ref<{ id: string; name: string }[]>([])
@@ -58,6 +58,19 @@ function download(blob: Blob, name: string) {
   a.click()
   a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
+// 漏斗弹层内处于生效状态的次要筛选项数量（用于漏斗角标提示）
+const advancedCount = computed(() =>
+  (filters.document_state !== 'all' ? 1 : 0) +
+  (filters.document_count ? 1 : 0) +
+  (filters.folder_count ? 1 : 0))
+
+// 「更多操作」下拉：导出筛选结果 / 导入 Owner / 下载导入模板
+function onMoreCommand(cmd: string) {
+  if (cmd === 'export') exportFile()
+  else if (cmd === 'template') exportFile(true)
+  else if (cmd === 'import') input.value?.click()
 }
 async function exportFile(template = false) {
   exporting.value = true
@@ -208,25 +221,38 @@ onUnmounted(stopPolling)
       <el-select v-model="filters.owner" placeholder="全部 Owner" aria-label="Owner过滤" clearable filterable>
         <el-option v-for="owner in owners" :key="owner" :label="owner" :value="owner" />
       </el-select>
-      <el-select v-model="filters.document_state" aria-label="有无文档过滤">
-        <el-option label="全部文档状态" value="all" />
-        <el-option label="无文档" value="empty" />
-        <el-option label="有文档" value="has" />
-      </el-select>
-      <el-select v-model="filters.document_count" aria-label="文档数量过滤">
-        <el-option label="全部文档数量" value="" />
-        <el-option label="0 个" value="0" />
-        <el-option label="1-9 个" value="1-9" />
-        <el-option label="10-99 个" value="10-99" />
-        <el-option label="100 个以上" value="100+" />
-      </el-select>
-      <el-select v-model="filters.folder_count" aria-label="文件夹数量过滤">
-        <el-option label="全部文件夹数量" value="" />
-        <el-option label="0 个" value="0" />
-        <el-option label="1-9 个" value="1-9" />
-        <el-option label="10-99 个" value="10-99" />
-        <el-option label="100 个以上" value="100+" />
-      </el-select>
+      <el-input v-model="filters.path" class="path-input" placeholder="目录路径模糊搜索" aria-label="目录路径过滤" clearable @keyup.enter="load(true)">
+        <template #prefix><el-icon><Search /></el-icon></template>
+      </el-input>
+      <!-- 次要筛选折叠进漏斗弹层：只外显 3 个高频搜索项，点漏斗从其下方展开其余筛选项 -->
+      <el-popover placement="bottom-start" :width="232" trigger="click" popper-class="gap-adv-popover">
+        <template #reference>
+          <el-badge :value="advancedCount" :hidden="!advancedCount" class="funnel-badge">
+            <el-button aria-label="更多筛选"><el-icon><Filter /></el-icon></el-button>
+          </el-badge>
+        </template>
+        <div class="adv-filters">
+          <el-select v-model="filters.document_state" aria-label="有无文档过滤">
+            <el-option label="全部文档状态" value="all" />
+            <el-option label="无文档" value="empty" />
+            <el-option label="有文档" value="has" />
+          </el-select>
+          <el-select v-model="filters.document_count" aria-label="文档数量过滤">
+            <el-option label="全部文档数量" value="" />
+            <el-option label="0 个" value="0" />
+            <el-option label="1-9 个" value="1-9" />
+            <el-option label="10-99 个" value="10-99" />
+            <el-option label="100 个以上" value="100+" />
+          </el-select>
+          <el-select v-model="filters.folder_count" aria-label="文件夹数量过滤">
+            <el-option label="全部文件夹数量" value="" />
+            <el-option label="0 个" value="0" />
+            <el-option label="1-9 个" value="1-9" />
+            <el-option label="10-99 个" value="10-99" />
+            <el-option label="100 个以上" value="100+" />
+          </el-select>
+        </div>
+      </el-popover>
       <el-button type="primary" :loading="loading" @click="load(true)">查询</el-button>
       <!-- 常驻显示，未选钉钉知识库时禁用，避免用户找不到入口；? 图标绝对定位在按钮右上角 -->
       <div class="refresh-btn-wrap">
@@ -243,11 +269,21 @@ onUnmounted(stopPolling)
         <template v-else-if="dtStatus.folder_count">快照：{{ dtStatus.folder_count }} 个文件夹{{ dtStatus.fetched_at ? `（${dtStatus.fetched_at.replace('T', ' ')}）` : '' }}</template>
         <template v-else>暂无快照，请点击「刷新数据」</template>
       </span>
-      <el-button :loading="exporting" @click="exportFile()">导出筛选结果</el-button>
-    </div>
-    <div v-if="canEdit" class="import-bar">
-      <el-button type="primary" :loading="importing" @click="input?.click()">导入 Owner</el-button>
-      <el-button :loading="exporting" @click="exportFile(true)">下载导入模板</el-button>
+      <!-- 导出/导入收进「更多操作」下拉，减少行内按钮数量；导入项仅编辑角色可见 -->
+      <el-dropdown @command="onMoreCommand">
+        <el-button :loading="exporting || importing">
+          更多操作<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="export">导出筛选结果</el-dropdown-item>
+            <template v-if="canEdit">
+              <el-dropdown-item command="import">导入 Owner</el-dropdown-item>
+              <el-dropdown-item command="template">下载导入模板</el-dropdown-item>
+            </template>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <input ref="input" type="file" accept=".csv,.xlsx" hidden @change="importFile" />
     </div>
     <el-table :data="rows" v-loading="loading" style="width: 100%">
@@ -303,8 +339,12 @@ onUnmounted(stopPolling)
 </template>
 
 <style scoped>
-.filters, .import-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.filters { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
 .filters .el-select { width: 200px; }
+.filters .path-input { width: 200px; }
+/* 漏斗弹层 teleport 到 body：需全局（:global）约束内部筛选项纵向排列、占满弹层宽度 */
+:global(.gap-adv-popover .adv-filters) { display: flex; flex-direction: column; gap: 10px; }
+:global(.gap-adv-popover .el-select) { width: 100%; }
 .cell-link { color: var(--el-color-primary); text-decoration: none; }
 .cell-link:hover { text-decoration: underline; }
 .filters .q { color: #9CA3AF; font-size: 14px; cursor: help; }
@@ -314,7 +354,6 @@ onUnmounted(stopPolling)
 :global(.gap-tip) { width: min(50vw, 640px); }
 :global(.gap-tip .gap-tip-text) { margin: 0; line-height: 1.6; }
 .dt-status { color: #909399; font-size: 12.5px; }
-.import-bar span { color: #909399; line-height: 1.6; flex: 1; min-width: 240px; }
 .el-pagination { margin-top: 20px; justify-content: flex-end; }
 .owner-path { overflow-wrap: anywhere; line-height: 1.6; margin-bottom: 20px; }
 .notify-text { line-height: 1.6; margin: 0 0 12px; }

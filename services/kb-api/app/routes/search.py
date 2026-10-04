@@ -21,7 +21,6 @@ router = APIRouter(prefix="/api/v1/search", tags=["search"])
 _TURN_THREADS: dict[tuple[str, str], tuple[float, str]] = {}
 
 
-
 class SearchIn(BaseModel):
     query: str
     kb_ids: list[str]
@@ -191,36 +190,55 @@ class ChatIn(BaseModel):
     action: Literal["", "continue", "stop"] = ""
 
 
-async def _resolve_retrieval_targets(body: "ChatIn", user, session) -> tuple[list[str], list[str]]:
-    """把选中的知识库解析为 (dify_dataset_ids, ragflow_dataset_ids)。
+async def _resolve_retrieval_targets(body: "ChatIn", user, session,
+                                     agent_library_ids: list[int] | None = None,
+                                     ) -> tuple[list[str], list[str], list[int]]:
+    """把选中的知识库解析为 (dify_dataset_ids, ragflow_dataset_ids, doc_library_ids)。
 
-    真相源=知识库抽象层（knowledge_libraries，enabled 的 dify / ragflow 镜像）：
-    - 传 library_ids：按知识库逐条解析（platform 决定通道），校验存在且启用；
-    - 兼容旧 knowledge_source_ids / dify_dataset_ids：走知识源注册表解析（过渡保护）；
-    - 都不传：默认全部启用的知识库镜像。
-    检索策略（rerank、检索方式等）由抽象层按 platform 内部决定，与本解析无关。
+    真相源=知识库抽象层（knowledge_libraries，enabled 的镜像/文档库）：
+    - 优先级：请求显式 library_ids > 智能体配置选库（knowledge_library_ids）；
+    - 智能体未配置选库时**不检索**（知识库为智能体的资源配置项，未选择=不使用）；
+    - 文档库（library_type=document）走本地检索通道（MinerU 解析 + 本地分段评分）；
+    - DIFY / RAGFlow 外部镜像按 platform 决定通道；
+    - 兼容旧 knowledge_source_ids / dify_dataset_ids：走知识源注册表解析（过渡保护）。
     非管理员只能检索启用的库（越权 403）。
     """
     from kb_common.models import KnowledgeLibrary, KnowledgeSource
 
+    def _split(rows) -> tuple[list[str], list[str], list[int]]:
+        dify, ragflow, docs = [], [], []
+        for r in rows:
+            if r.library_type == "document":
+                docs.append(r.id)
+            elif r.platform == "dify":
+                dify.append(r.dataset_id)
+            else:
+                ragflow.append(r.dataset_id)
+        return dify, ragflow, docs
+
     is_admin = user.role in {"admin", "super_admin"}
     dify_ids: list[str] = []
     ragflow_ids: list[str] = []
+    doc_library_ids: list[int] = []
 
+    # 生效选库：请求显式 > 智能体配置；均未指定时缺省全部启用库
+    selected: list[int] | None = None
     if body.library_ids is not None:
+        selected = list(body.library_ids)
+    elif agent_library_ids:
+        selected = list(agent_library_ids)
+
+    if selected is not None:
         rows = (await session.execute(select(KnowledgeLibrary).where(KnowledgeLibrary.library_type != "material"))).scalars().all()
         by_id = {r.id: r for r in rows}
         if not is_admin:
-            bad = [i for i in body.library_ids
+            bad = [i for i in selected
                    if i not in by_id or not by_id[i].enabled]
             if bad:
                 raise HTTPException(403, "无权检索未向企业问答开放的知识库")
-        for lid in body.library_ids:
-            r = by_id.get(lid)
-            if not r:
-                # 选到已删除的库时忽略，避免整轮失败
-                continue
-            (dify_ids if r.platform == "dify" else ragflow_ids).append(r.dataset_id)
+        rows = [by_id[i] for i in dict.fromkeys(selected)
+                if by_id.get(i) and by_id[i].enabled]  # 全局停用的库不参与检索
+        dify_ids, ragflow_ids, doc_library_ids = _split(rows)
     elif body.knowledge_source_ids is not None or body.dify_dataset_ids is not None:
         rows = (await session.execute(select(KnowledgeSource).where(
             KnowledgeSource.enabled == True,  # noqa: E712
@@ -249,19 +267,14 @@ async def _resolve_retrieval_targets(body: "ChatIn", user, session) -> tuple[lis
             if not is_admin and set(dify_ids) - allowed_dify:
                 raise HTTPException(403, "无权检索未向企业问答开放的数据集")
     else:
-        # 缺省：知识库抽象层里全部启用的库
-        rows = (await session.execute(select(KnowledgeLibrary).where(
-            KnowledgeLibrary.enabled == True,  # noqa: E712
-            KnowledgeLibrary.library_type != "material",
-        ))).scalars().all()
-        for r in rows:
-            (dify_ids if r.platform == "dify" else ragflow_ids).append(r.dataset_id)
+        # 智能体未配置选库：不检索任何知识库（未选择=不使用）
+        return [], [], []
 
     dify_ids = list(dict.fromkeys(dify_ids))
     ragflow_ids = list(dict.fromkeys(ragflow_ids))
-    if len(dify_ids) + len(ragflow_ids) > 24:
+    if len(dify_ids) + len(ragflow_ids) + len(doc_library_ids) > 24:
         raise HTTPException(422, "单次检索的知识库过多，请缩小范围")
-    return dify_ids, ragflow_ids
+    return dify_ids, ragflow_ids, doc_library_ids
 
 
 async def _prepare_qa(body: ChatIn, user, session) -> dict:
@@ -275,8 +288,13 @@ async def _prepare_qa(body: ChatIn, user, session) -> dict:
 
     cfg = await load_agent_config(session)
     llm = await resolve_llm_config(session, body.llm_profile_id, body.model)
-    # 检索目标：从知识源注册表解析为 dify / ragflow 两组 dataset（取代旧的 dify_dataset_ids 设置项）
-    datasets, ragflow_datasets = await _resolve_retrieval_targets(body, user, session)
+    # 检索目标：优先请求显式选库，其次智能体配置选库（knowledge_library_ids）；
+    # 智能体级停用的库（knowledge_library_disabled_ids，配置页开关控制）不参与检索；
+    # 智能体未配置选库时不检索（未选择=不使用）；解析为 dify / ragflow 数据集与本地文档库三组通道
+    _disabled = set(cfg.get("knowledge_library_disabled_ids") or [])
+    agent_ids = [i for i in (cfg.get("knowledge_library_ids") or []) if i not in _disabled] or None
+    datasets, ragflow_datasets, doc_library_ids = await _resolve_retrieval_targets(
+        body, user, session, agent_library_ids=agent_ids)
     local_ids = [str(k) for k in body.kb_ids]
     if local_ids:
         query = select(KnowledgeBase).where(KnowledgeBase.id.in_(body.kb_ids))
@@ -311,7 +329,7 @@ async def _prepare_qa(body: ChatIn, user, session) -> dict:
         thread_id = f"anon-{user.id}-{uuid4()}"
     tools = cfg.get("tools_enabled") or {}
     if not tools.get("knowledge_search", True):
-        datasets, ragflow_datasets, local_ids = [], [], []
+        datasets, ragflow_datasets, local_ids, doc_library_ids = [], [], [], []
     top_k = body.top_k if body.top_k is not None else int(cfg.get("top_k", 8))
     return {
         "query": body.query,
@@ -319,6 +337,7 @@ async def _prepare_qa(body: ChatIn, user, session) -> dict:
         "dataset_ids": datasets,
         "ragflow_dataset_ids": ragflow_datasets,
         "kb_ids": local_ids,
+        "doc_library_ids": doc_library_ids,
         "top_k": top_k,
         "plan_mode": bool(cfg.get("planning_enabled", True)),
         "subagent_enabled": bool(cfg.get("subagent_enabled", False)),
@@ -375,6 +394,7 @@ async def _mask_qa_events(params: dict, u, s: AsyncSession):
 
     try:
         scope_ids = {f"kb:{k}" for k in (params.get("kb_ids") or []) if k}
+        scope_ids |= {f"library:{i}" for i in (params.get("doc_library_ids") or [])}
         ds = list(params.get("dataset_ids") or []) + list(params.get("ragflow_dataset_ids") or [])
         if ds:
             libs = (await s.execute(select(KnowledgeLibrary))).scalars().all()

@@ -92,11 +92,11 @@ watch(() => props.kbId, fetchTree)
 <style scoped>
 .directory-tree { width: 240px; border-right: 1px solid #e6e6e6; padding: 12px; }
 .tree-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-weight: 600; }
-.add-icon { cursor: pointer; color: #409EFF; }
+.add-icon { cursor: pointer; color: var(--el-color-primary); }
 .tree-node { display: flex; align-items: center; gap: 4px; flex: 1; }
 .node-label { flex: 1; }
-.node-add { cursor: pointer; color: #409EFF; opacity: 0; }
+.node-add { cursor: pointer; color: var(--el-color-primary); opacity: 0; }
 .tree-node:hover .node-add { opacity: 1; }
 .all-docs { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; border-radius: 4px; margin-top: 8px; }
-.all-docs.active { background: #ecf5ff; color: #409EFF; }
+.all-docs.active { background: var(--el-color-primary-light-9); color: var(--el-color-primary); }
 </style>

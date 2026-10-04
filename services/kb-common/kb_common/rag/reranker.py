@@ -7,6 +7,10 @@ import httpx
 from kb_common.config import get_settings
 from kb_common.rag.scoring import apply_rerank, rerank_term_scores
 
+# 单文档截断：超长分段会超过 rerank 模型上下文（如 bge-reranker-v2-m3 8192 token）
+# 被服务以 400 拒绝；二阶段重排取段首即可保持排序信号。
+_MAX_DOC_CHARS = 4000
+
 _session: httpx.Client | None = None
 
 
@@ -28,7 +32,8 @@ def rerank(query: str, docs: list[dict], top_n: int = 10) -> list[dict]:
         s.rerank_api_url,
         headers={"Authorization": f"Bearer {s.rerank_api_key}"} if s.rerank_api_key else {},
         json={"model": s.rerank_model, "query": query,
-              "documents": [d.get("text", "") for d in docs], "top_n": len(docs)},
+              "documents": [(d.get("text") or "")[:_MAX_DOC_CHARS] for d in docs],
+              "top_n": len(docs)},
     )
     resp.raise_for_status()
     results = resp.json().get("results", [])

@@ -190,8 +190,8 @@ export const updateRerankProfile = (id: string, data: { name: string; api_url: s
 export const deleteRerankProfile = (id: string) =>
   request.delete<unknown, void>(`/settings/rerank-profiles/${id}`)
 
-export const enableRerankProfile = (id: string) =>
-  request.put<unknown, { ok: boolean }>(`/settings/rerank-profiles/${id}/enable`)
+export const enableRerankProfile = (id: string, enabled = true) =>
+  request.put<unknown, { ok: boolean }>(`/settings/rerank-profiles/${id}/enable`, { enabled })
 
 // ============ Embedding 向量模型多配置 ============
 

@@ -198,7 +198,7 @@ flowchart LR
 | 运行方式 | 进程内嵌入式 `DeerFlowClient` 直跑 Lead Agent（create_agent 中间件链 + Sub-Agent 并行调研 + 长期记忆 + 摘要压缩 + sqlite 检查点），无需 langgraph server |
 | 配置自举 | 启动时 `GET kb-api /api/v1/agent/bootstrap` 拉取模型配置，生成 `config.yaml` 与 `SOUL.md` 人格；kb-api 晚启动时后台重试（40 次 × 5s） |
 | Agent 工具（`extensions/kb_tools.py`） | `knowledge_search`（统一知识库层多源检索）、`dingtalk_browse`（目录地图预判/列目录，在线文档优先）、`dingtalk_search`（文件名缓存补漏）、`dingtalk_read_doc`（dws CLI 读正文，二进制文件优先本地 MinerU 解析） |
-| 检索策略（SOUL.md/SKILL.md 规定） | 先预判目录再进目录；知识类问题主动同时双源检索；每读完一篇即判断能否作答；钉钉命中文档必须读正文；3-5 次关键词穷尽检索 |
+| 检索策略（人格 SOUL.md / 技能 SKILL.md 规定） | 先预判目录再进目录；知识类问题主动同时双源检索；每读完一篇即判断能否作答；钉钉命中文档必须读正文；3-5 次关键词穷尽检索 |
 | 并发与取消 | 专属 worker 线程 + asyncio.Queue 泵驱动同步 `agent.stream()`；sqlite 检查点方法级 RLock 支持多会话并行（前端最多 5 路）；`/v1/chat/cancel` 确定性停止 |
 | 限时探索 | 1 分钟询问 / 5 分钟再问 / 10 分钟兜底（`ExplorationTimeoutMiddleware`，阈值可用 `KGE_EXPLORE_*` 覆盖） |
 

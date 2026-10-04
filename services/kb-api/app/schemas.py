@@ -304,6 +304,7 @@ class SyncTaskOut(BaseModel):
     retry_count: int
     started_at: datetime | None
     finished_at: datetime | None
+    library_document_id: str | None = None
     created_at: datetime
 
 

@@ -403,9 +403,16 @@ async function removeRrProfile(p: RerankProfile) {
   await loadRerankProfiles()
 }
 
-async function enableRrProfile(p: RerankProfile) {
-  await enableRerankProfile(p.id)
-  ElMessage.success(`已切换生效：${p.name}`)
+async function enableRrProfile(p: RerankProfile, enable: boolean) {
+  if (!enable) {
+    try {
+      await ElMessageBox.confirm(
+        `关闭后所有知识库检索将不再进行 Rerank 重排（可随时重新开启），确定关闭「${p.name}」？`,
+        '关闭默认重排模型', { type: 'warning', confirmButtonText: '关闭', cancelButtonText: '取消' })
+    } catch { return }
+  }
+  await enableRerankProfile(p.id, enable)
+  ElMessage.success(enable ? `已设为生效模型：${p.name}` : '已关闭重排模型')
   await loadRerankProfiles()
 }
 
@@ -873,7 +880,7 @@ async function loadMenuConfig() {
         visible: !hidden.includes(r.path),
       }))
     // 保持路由定义顺序
-    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/queue', '/process', '/process/engine', '/apply', '/operate', '/operate/dashboard', '/operate/qa', '/operate/corrections', '/govern', '/govern/gaps', '/govern/review']
+    const orderedPaths = ['/chat', '/deap-agent', '/hiagent', '/collection', '/knowledge-sources', '/collection/dingtalk', '/collection/knowledge-center', '/collection/queue', '/process', '/process/engine', '/apply', '/operate', '/operate/dashboard', '/operate/qa', '/operate/corrections', '/govern', '/govern/gaps', '/govern/review']
     items.sort((a, b) => {
       const ia = orderedPaths.indexOf(a.path)
       const ib = orderedPaths.indexOf(b.path)
@@ -1116,9 +1123,13 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 <el-button size="small" type="primary" @click="openRrCreate">+ 新增重排配置</el-button>
               </div>
               <el-table v-if="rerankProfiles.length" :data="rerankProfiles" size="small" v-loading="rerankLoading" style="margin-top: 8px">
-                <el-table-column label="生效" width="70">
+                <el-table-column label="默认模型" width="84">
                   <template #default="{ row }">
-                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableRrProfile(row as RerankProfile)">&nbsp;</el-radio>
+                    <el-switch
+                      :model-value="!!row.enabled"
+                      :aria-label="`设为默认模型 ${row.name}`"
+                      @change="(v: string | number | boolean) => enableRrProfile(row as RerankProfile, !!v)"
+                    />
                   </template>
                 </el-table-column>
                 <el-table-column prop="name" label="名称" min-width="140">
@@ -1143,7 +1154,7 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 </el-table-column>
               </el-table>
               <div v-else class="empty">尚无重排配置，点击「新增重排配置」添加；未配置时检索跳过重排（RRF/BM25 排序兜底）。</div>
-              <div class="field-hint" style="margin-top: 6px">Jina/SiliconFlow 风格 /rerank 端点，可配置多条，单选切换生效；API Key 非必填（内网/自建服务常免鉴权）。</div>
+              <div class="field-hint" style="margin-top: 6px">Jina/SiliconFlow 风格 /rerank 端点，可配置多条，通过开关单选一条作为生效（默认）模型；知识库「检索设置」中只能选择已生效的模型。API Key 非必填（内网/自建服务常免鉴权）。</div>
             </div>
           </el-form-item>
 
@@ -1559,7 +1570,7 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
 .site-logo-preview {
   width: 48px; height: 48px; border-radius: 8px; flex-shrink: 0;
   display: grid; place-items: center; overflow: hidden;
-  background: linear-gradient(135deg, #2b6bff, #6d28d9);
+  background: linear-gradient(135deg, var(--app-brand-blue), #6d28d9);
 }
 .site-logo-preview img { width: 100%; height: 100%; object-fit: cover; }
 .site-logo-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
@@ -1570,7 +1581,7 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
 .model-pick-list { width: 100%; border: 1px solid #e4e7ed; border-radius: 8px; padding: 6px 12px; max-height: 240px; overflow-y: auto; }
 .mpl-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed #ebeef5; }
 .mpl-row:last-child { border-bottom: none; }
-.doc-link { color: #409eff; font-size: 13px; text-decoration: none; }
+.doc-link { color: var(--el-color-primary); font-size: 13px; text-decoration: none; }
 .doc-link:hover { text-decoration: underline; }
 .dt-result { width: 100%; border: 1px solid #e4e7ed; border-radius: 10px; padding: 12px 16px; background: #fafbfc; }
 .dt-result.ok { border-color: #b3e19d; background: #f7fbf5; }

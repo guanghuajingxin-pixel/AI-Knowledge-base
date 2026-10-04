@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/stores/user'
+import { sso } from '@/auth/session'
 
 const service: AxiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL,
@@ -9,8 +10,9 @@ const service: AxiosInstance = axios.create({
 })
 
 service.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
+  async (config: InternalAxiosRequestConfig) => {
     const userStore = useUserStore()
+    if (sso.isSso) userStore.setToken(await sso.getToken())
     if (userStore.token) {
       config.headers.Authorization = `Bearer ${userStore.token}`
     }
@@ -31,8 +33,9 @@ service.interceptors.response.use(
         return Promise.reject(error)
       }
       const userStore = useUserStore()
-      userStore.logout()
-      window.location.href = '/login'
+      userStore.logout(false)
+      // A rejected SSO profile during bootstrap must render the login error, not loop redirects.
+      if (!(sso.isSso && reqUrl.includes('/users/me'))) window.location.href = '/login'
     } else {
       ElMessage.error(message)
     }

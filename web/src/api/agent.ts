@@ -14,6 +14,10 @@ export interface AgentConfig {
   models: string[]               // 参与调度的模型（最多 10）
   default_model: string          // 智能体默认模型（须为 models 之一；空串跟随列表首个）
   retrieval_mode: 'smart' | 'force'  // 智能调用 / 强制调用
+  /** 问答检索的知识库范围（knowledge_libraries 表 ID）：空=不检索（未选择=不使用） */
+  knowledge_library_ids?: number[]
+  /** 智能体级停用的选库（knowledge_library_ids 子集，配置页开关控制）：停用的库不参与检索 */
+  knowledge_library_disabled_ids?: number[]
   greeting_enabled: boolean
   greeting: string
   suggested_questions: string[]
@@ -45,7 +49,6 @@ export interface SkillDoc {
   description: string
   content: string
   enabled: boolean
-  builtin: boolean
 }
 
 export const getAgentTools = () =>
@@ -91,20 +94,14 @@ export const updateAgentConfig = (data: Partial<AgentConfig>) =>
 
 export const getGreeting = () => request.get<unknown, GreetingInfo>('/agent/greeting')
 
-/** 智能体人格（SOUL.md）/ 问答技能（SKILL.md）提示词配置 */
+/** 智能体人格（SOUL.md）提示词配置 */
 export interface PromptDoc {
   content: string        // 当前生效内容
   custom: boolean        // 是否为用户自定义（false=默认模板）
   default: string        // 默认模板内容（用于"恢复默认"）
-  skill_name?: string
 }
 
 export const getPersona = () => request.get<unknown, PromptDoc>('/agent/persona')
 
 export const savePersona = (data: { content?: string; reset?: boolean }) =>
   request.put<unknown, { ok: boolean; custom: boolean }>('/agent/persona', data)
-
-export const getSkill = () => request.get<unknown, PromptDoc>('/agent/skill')
-
-export const saveSkill = (data: { content?: string; reset?: boolean }) =>
-  request.put<unknown, { ok: boolean; custom: boolean }>('/agent/skill', data)

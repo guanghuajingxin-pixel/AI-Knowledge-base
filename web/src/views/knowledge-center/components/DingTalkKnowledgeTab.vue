@@ -5,7 +5,8 @@
  * 支持按知识库 / 创建人 / 目录过滤；操作列可对文件做入库审核（通过/待确认/待更正）
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { Search, Refresh, Document } from '@element-plus/icons-vue'
+import { Search, Refresh } from '@element-plus/icons-vue'
+import { fileIcon } from '@/utils/file-icon'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchDingTalkDocuments, reviewDingTalkDocument } from '@/api/knowledge-center'
 import { formatDate, formatFileSize } from '@/utils/format'
@@ -300,7 +301,7 @@ onUnmounted(() => {
       <el-table-column label="文件名称" min-width="360" prop="name" show-overflow-tooltip>
         <template #default="scope: any">
           <el-link type="primary" :underline="false" :href="scope.row.url" target="_blank" :disabled="!scope.row.url">
-            <el-icon class="file-icon"><Document /></el-icon>
+            <img class="file-icon" :src="fileIcon(scope.row.name)" alt="" />
             {{ scope.row.name }}
           </el-link>
         </template>
@@ -481,8 +482,11 @@ onUnmounted(() => {
 }
 
 .file-icon {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
   margin-right: 4px;
-  vertical-align: -2px;
+  vertical-align: -5px;
 }
 
 .dir-path {
@@ -516,7 +520,7 @@ onUnmounted(() => {
 
 .sync-hint {
   font-size: 13px;
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 .col-muted {

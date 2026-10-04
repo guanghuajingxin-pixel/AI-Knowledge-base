@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { CascaderOption } from 'element-plus'
 import { listDifyDatasets, listSupportedExtensions, syncDingTalkFile, type DifyDataset } from '@/api/dify'
+import { fileIcon } from '@/utils/file-icon'
 import { fetchDingTalkWorkspaces, fetchDingTalkNodes } from '@/api/knowledge-center'
 import type { DingTalkWorkspace, DingTalkNode } from '@/types/knowledge-center'
 import Sources from './Sources.vue'
@@ -323,7 +324,7 @@ watch(activeTab, (tab) => {
             </div>
             <el-table :data="pageFiles" v-loading="loading" row-key="node_id" @selection-change="changeSelection">
               <el-table-column type="selection" width="48" :selectable="isSyncable" />
-              <el-table-column prop="name" label="文档名称" min-width="300" show-overflow-tooltip />
+              <el-table-column prop="name" label="文档名称" min-width="300" show-overflow-tooltip><template #default="{ row }"><div class="doc-name-cell"><img class="file-ico" :src="fileIcon(row.name)" alt="" />{{ row.name }}</div></template></el-table-column>
               <el-table-column label="格式" width="90"><template #default="{ row }"><el-tag size="small" :type="isSyncable(row) ? 'success' : 'info'">{{ (row.extension || '—').toUpperCase() }}</el-tag></template></el-table-column>
               <el-table-column label="大小" width="100"><template #default="{ row }">{{ formatSize(row.size) }}</template></el-table-column>
               <el-table-column label="同步状态" width="100"><template #default="{ row }"><el-tag size="small" :type="isSyncable(row) ? 'success' : 'warning'">{{ isSyncable(row) ? '可同步' : '暂不支持' }}</el-tag></template></el-table-column>
@@ -338,6 +339,9 @@ watch(activeTab, (tab) => {
 </template>
 
 <style scoped>
+/* 文档名称列：类型图标 + 名称 */
+.doc-name-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.file-ico { width: 22px; height: 22px; flex: none; object-fit: contain; }
 .sync-tabs :deep(.el-tabs__item) { font-size: 15px; font-weight: 600; }
 .card-header { display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .hint { margin-left: 10px; color: var(--el-text-color-secondary); font-size: 12px; }

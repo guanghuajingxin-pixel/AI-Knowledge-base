@@ -90,7 +90,7 @@ onMounted(() => {
 .doc-info { background: #fafafa; padding: 16px; border-radius: 4px; }
 .segment-item { border: 1px solid #ebeef5; border-radius: 4px; margin-bottom: 12px; overflow: hidden; }
 .seg-header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: #f5f7fa; border-bottom: 1px solid #ebeef5; }
-.seg-index { font-weight: 600; color: #409EFF; }
+.seg-index { font-weight: 600; color: var(--el-color-primary); }
 .seg-meta { font-size: 12px; color: #909399; }
 .seg-content { padding: 16px; font-size: 14px; line-height: 1.8; color: #303133; white-space: pre-wrap; }
 .pagination { margin-top: 16px; justify-content: flex-end; }

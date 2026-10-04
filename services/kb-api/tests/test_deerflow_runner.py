@@ -28,9 +28,6 @@ END = {"type": "end", "usage": {"input_tokens": 10, "output_tokens": 5, "total_t
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        deerflow_runner._THREAD_CITES.clear()
-
     async def collect(self, body: str) -> list[dict]:
         real_client = httpx.AsyncClient
 
@@ -177,25 +174,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e["status"] for e in events if e.get("step_id") == "expand"], ["running", "failed"])
         self.assertEqual(self.final_of(events)["quality"]["verification"], "unverified")
 
-    async def test_pause_requires_normal_end_and_never_replays_answer(self):
+    async def test_clarification_ends_with_clarification_answer(self):
         choice = {"type": "tool_start", "name": "ask_clarification", "args": {"question": "继续探索？", "options": ["继续", "停止"]}}
         events = await self.collect(sse(choice, END))
-        self.assertEqual(events[-1]["type"], "choice_pause")
-        self.assertFalse(any(e["type"] == "final" for e in events))
-        events = await self.collect(sse(choice))
-        self.assertEqual(events[-1]["type"], "config_error")
-
-
-    async def test_opt_in_summary_score_and_sources_survive_pause(self):
-        hits={"results":[{"document_title":"制度","content":"需要审批","document_id":"d"}]}
-        body=sse(RETRIEVE_START,{"type":"tool_end","name":"knowledge_search","content":json.dumps(hits)},
-                 {"type":"tool_start","name":"ask_clarification","args":{
-                     "question":"继续吗","options":["继续从钉钉知识库探索","基于知识库内容回答"],
-                     "choice_kind":"dingtalk_opt_in","evidence_summary":"需要审批，角色未明确", "confidence":30,
-                     "confidence_reason":"缺少审批人"}},END)
-        paused=(await self.collect(body))[-1]
-        self.assertEqual(paused['type'],'choice_pause')
-        self.assertEqual(paused['confidence'],30)
-        self.assertEqual(paused['choice_kind'],'dingtalk_opt_in')
-        self.assertIn('角色未明确',paused['evidence_summary'])
-        self.assertEqual(len(paused['citations']),1)
+        result = self.final_of(events)
+        self.assertEqual(result["answer_status"], "clarification")
+        self.assertIn("继续探索？", result["answer"])
+        self.assertEqual(result["citations"], [])

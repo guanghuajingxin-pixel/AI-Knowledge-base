@@ -168,8 +168,8 @@ onUnmounted(() => {
 }
 
 .tab-item.active {
-  color: #409EFF;
-  border-bottom-color: #409EFF;
+  color: var(--el-color-primary);
+  border-bottom-color: var(--el-color-primary);
   font-weight: 500;
 }
 

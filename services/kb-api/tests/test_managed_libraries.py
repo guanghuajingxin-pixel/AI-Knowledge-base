@@ -770,7 +770,7 @@ class StagingFlowTests(unittest.IsolatedAsyncioTestCase):
         body = routes.StagingCommitIn(items=[{'staging_id': str(sid), 'name': '报告.pdf', 'size': 9}])
         m1, m2, m3 = self.staging_mocks(fake)
         with m1, m2, m3, patch.object(routes, '_do_parse', AsyncMock()) as do_parse:
-            result = await routes.staging_commit(7, body, session)
+            result = await routes.staging_commit(7, body, SimpleNamespace(username='tester'), session)
         self.assertEqual(result['errors'], [])
         self.assertEqual(len(result['documents']), 1)
         doc = session.add.call_args[0][0]
@@ -790,7 +790,7 @@ class StagingFlowTests(unittest.IsolatedAsyncioTestCase):
         body = routes.StagingCommitIn(items=[{'staging_id': str(sid), 'name': 'a.pdf', 'size': 1}])
         m1, m2, m3 = self.staging_mocks(fake)
         with m1, m2, m3:
-            result = await routes.staging_commit(7, body, session)
+            result = await routes.staging_commit(7, body, SimpleNamespace(username='tester'), session)
         self.assertEqual(result['documents'], [])
         self.assertEqual(len(result['errors']), 1)
         session.add.assert_not_called()
@@ -804,7 +804,7 @@ class StagingFlowTests(unittest.IsolatedAsyncioTestCase):
         body = routes.StagingCommitIn(items=[{'staging_id': str(sid), 'name': 'a.pdf', 'size': 1}])
         m1, m2, m3 = self.staging_mocks(fake)
         with m1, m2, m3, patch.object(routes, '_do_parse', AsyncMock(side_effect=RuntimeError('engine down'))):
-            result = await routes.staging_commit(7, body, session)
+            result = await routes.staging_commit(7, body, SimpleNamespace(username='tester'), session)
         self.assertEqual(len(result['documents']), 1)
         doc = session.add.call_args[0][0]
         self.assertEqual(doc.status, 'FAILED')

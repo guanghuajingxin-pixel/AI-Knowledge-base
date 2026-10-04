@@ -31,7 +31,12 @@ def submit_task_retry(task_id: int) -> None:
 
 
 def retry_task(task_id: int) -> dict:
-    """重处理单个失败任务；返回 {ok, message}。"""
+    """重处理单个失败任务；返回 {ok, message}。
+
+    library 批处理模式任务（library_document_id 非空 / 源 backend_type=library）
+    改为重新入队 pending，由批处理作业分批消费（与批处理并发安全）；
+    dify/ragflow 任务保持直跑重处理。
+    """
     with SyncSessionLocal() as db:
         task = db.get(SyncTask, task_id)
         if task is None:
@@ -41,6 +46,23 @@ def retry_task(task_id: int) -> dict:
         if not task.node_id or task.source_id is None:
             return {"ok": False, "message": "任务缺少钉钉节点或同步源信息，无法重试"}
         source_id = task.source_id
+        is_library = bool(task.library_document_id)
+        if not is_library:
+            source = db.get(SyncSource, source_id)
+            is_library = source is not None and (source.backend_type or "").strip().lower() == "library"
+
+    if is_library:
+        with SyncSessionLocal() as db:
+            task = db.get(SyncTask, task_id)
+            if task is None or task.status != "failed":
+                return {"ok": False, "message": "任务已不在失败状态"}
+            task.status = "pending"
+            task.started_at = None
+            task.finished_at = None
+            task.error = ""
+            task.retry_count = (task.retry_count or 0) + 1
+            db.commit()
+        return {"ok": True, "message": "任务已重新入队，等待批处理分批同步"}
 
     with source_lock(source_id, WORKER_LOCK) as free:
         if not free:

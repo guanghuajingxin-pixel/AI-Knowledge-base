@@ -120,6 +120,8 @@ export type GapCountRange = '' | '0' | '1-9' | '10-99' | '100+'
 export interface GapFilters {
   kb_id?: string
   owner?: string
+  /** 目录路径模糊搜索（忽略大小写包含匹配） */
+  path?: string
   document_state: 'all' | 'empty' | 'has'
   document_count?: GapCountRange
   folder_count?: GapCountRange

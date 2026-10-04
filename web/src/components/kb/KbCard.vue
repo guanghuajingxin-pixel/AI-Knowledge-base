@@ -20,7 +20,7 @@ function open() {
 <template>
   <el-card class="kb-card" shadow="hover" @click="open">
     <div class="kb-card-header">
-      <el-icon size="32" :color="kb.kb_type === 'FAQ' ? '#67c23a' : '#409EFF'">
+      <el-icon size="32" :color="kb.kb_type === 'FAQ' ? 'var(--el-color-success)' : 'var(--el-color-primary)'">
         <ChatDotRound v-if="kb.kb_type === 'FAQ'" />
         <Document v-else />
       </el-icon>

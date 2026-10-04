@@ -30,13 +30,27 @@ const visible = computed({
 
 // 本地编辑副本，取消时回滚
 const draft = ref<RetrievalSettings>({ ...props.settings })
-watch(() => props.modelValue, (v) => { if (v) draft.value = { ...props.settings } })
 
 const rerankProfiles = ref<RerankProfile[]>([])
-async function loadRerankProfiles() {
-  try { rerankProfiles.value = await listRerankProfiles() } catch { /* ignore */ }
+/** 检索设置只能选择「模型配置」中已生效（默认）的 Rerank 模型 */
+const enabledProfiles = computed(() => rerankProfiles.value.filter(p => p.enabled))
+
+async function loadOnOpen() {
+  draft.value = { ...props.settings }
+  try {
+    rerankProfiles.value = await listRerankProfiles()
+  } catch { /* ignore */ }
+  // 已保存的模型被停用/删除时清空无效选择；仅一个生效模型时自动选中（与开启开关行为一致）
+  if (draft.value.rerank_model_id
+    && !enabledProfiles.value.some(p => p.id === draft.value.rerank_model_id)) {
+    draft.value.rerank_model_id = ''
+  }
+  if (draft.value.rerank
+    && !draft.value.rerank_model_id && enabledProfiles.value.length === 1) {
+    draft.value.rerank_model_id = enabledProfiles.value[0].id
+  }
 }
-watch(() => props.modelValue, (v) => { if (v) loadRerankProfiles() }, { immediate: true })
+watch(() => props.modelValue, (v) => { if (v) void loadOnOpen() })
 
 const strategies = [
   { value: 'hybrid', label: '混合检索', desc: '同时使用向量检索和全文检索两种策略进行召回，推荐在需要对句子理解和语义关联性的场景使用，综合效果更优', icon: Connection },
@@ -46,6 +60,14 @@ const strategies = [
 
 const keywordWeight = computed(() => +(1 - draft.value.vector_weight).toFixed(2))
 
+function onRerankToggle(v: string | number | boolean) {
+  draft.value.rerank = !!v
+  // 仅有一个生效模型时自动选中，减少一次操作
+  if (v && !draft.value.rerank_model_id && enabledProfiles.value.length === 1) {
+    draft.value.rerank_model_id = enabledProfiles.value[0].id
+  }
+}
+
 function cancel() { visible.value = false }
 function save() {
   emit('save', { ...draft.value })
@@ -54,7 +76,7 @@ function save() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="检索设置" width="min(600px, 92vw)" :close-on-click-modal="false">
+  <el-dialog v-model="visible" title="检索设置" width="min(720px, 94vw)" :close-on-click-modal="false">
     <div class="rsd-body">
       <!-- 检索策略选择 -->
       <div class="rsd-strategies">
@@ -74,86 +96,100 @@ function save() {
         </div>
       </div>
 
-      <!-- 检索参数配置（所有模式统一展示） -->
+      <!-- 检索参数配置：统一用 el-form / el-form-item，标签宽度与行间距遵循组件规范 -->
       <div class="rsd-config-panel">
         <div class="rsd-config-title">
           <el-icon><refresh-right /></el-icon>
           <span>检索参数</span>
         </div>
 
-        <!-- Rerank 模型 -->
-        <div class="rsd-config-row">
-          <div class="rsd-config-label">
-            <span>Rerank 模型</span>
-            <el-switch v-model="draft.rerank" size="small" style="margin-left: 12px" />
-          </div>
-          <el-select
-            v-model="draft.rerank_model_id"
-            class="rsd-config-control"
-            placeholder="请选择 Rerank 模型"
-            :disabled="!draft.rerank"
-            filterable
-          >
-            <el-option
-              v-for="p in rerankProfiles"
-              :key="p.id"
-              :label="`${p.name}（${p.model}）`"
-              :value="p.id"
-            />
-          </el-select>
-        </div>
+        <el-form class="rsd-form" label-width="96px" label-position="right">
+          <!-- Rerank 模型 -->
+          <el-form-item label="Rerank 模型">
+            <div class="rsd-control-stack">
+              <div class="rsd-field-row">
+                <el-switch
+                  :model-value="draft.rerank"
+                  aria-label="Rerank 模型开关"
+                  @change="onRerankToggle"
+                />
+                <el-select
+                  v-model="draft.rerank_model_id"
+                  class="rsd-rerank-select"
+                  placeholder="请选择已生效的 Rerank 模型"
+                  :disabled="!draft.rerank"
+                  filterable
+                  clearable
+                >
+                  <el-option
+                    v-for="p in enabledProfiles"
+                    :key="p.id"
+                    :label="`${p.name}（${p.model}）`"
+                    :value="p.id"
+                  />
+                </el-select>
+              </div>
+              <el-alert
+                v-if="draft.rerank && enabledProfiles.length === 0"
+                type="warning"
+                show-icon
+                :closable="false"
+                title="暂无已生效的 Rerank 模型，请先到「系统配置 · 模型配置」中启用"
+                class="rsd-alert"
+              />
+            </div>
+          </el-form-item>
 
-        <!-- 权重设置（混合检索未开 Rerank 时生效） -->
-        <div v-if="draft.mode === 'hybrid' && !draft.rerank" class="rsd-config-row">
-          <div class="rsd-config-label"><span>权重设置</span></div>
-          <div class="rsd-weight-group">
-            <span class="rsd-weight-label">语义 {{ draft.vector_weight.toFixed(2) }}</span>
-            <el-slider
-              v-model="draft.vector_weight"
-              class="rsd-threshold-slider"
-              :min="0"
-              :max="1"
-              :step="0.05"
-              :show-tooltip="false"
-            />
-            <span class="rsd-weight-label">关键词 {{ keywordWeight.toFixed(2) }}</span>
-          </div>
-        </div>
+          <!-- 权重设置（混合检索未开 Rerank 时生效） -->
+          <el-form-item v-if="draft.mode === 'hybrid' && !draft.rerank" label="权重设置">
+            <div class="rsd-weight-group">
+              <span class="rsd-weight-label">语义 {{ draft.vector_weight.toFixed(2) }}</span>
+              <el-slider
+                v-model="draft.vector_weight"
+                class="rsd-slider"
+                :min="0"
+                :max="1"
+                :step="0.05"
+                :show-tooltip="false"
+              />
+              <span class="rsd-weight-label">关键词 {{ keywordWeight.toFixed(2) }}</span>
+            </div>
+          </el-form-item>
 
-        <!-- Top K -->
-        <div class="rsd-config-row">
-          <div class="rsd-config-label"><span>Top K</span></div>
-          <el-input-number
-            v-model="draft.top_k"
-            class="rsd-config-control"
-            :min="1"
-            :max="50"
-            controls-position="right"
-          />
-        </div>
-
-        <!-- Score 阈值 -->
-        <div class="rsd-config-row">
-          <div class="rsd-config-label"><span>Score 阈值</span></div>
-          <div class="rsd-threshold-group">
-            <el-slider
-              v-model="draft.score_threshold"
-              class="rsd-threshold-slider"
-              :min="0"
-              :max="1"
-              :step="0.01"
-              :show-tooltip="false"
-            />
+          <!-- Top K -->
+          <el-form-item label="Top K">
             <el-input-number
-              v-model="draft.score_threshold"
-              :min="0"
-              :max="1"
-              :step="0.05"
-              :precision="2"
+              v-model="draft.top_k"
+              :min="1"
+              :max="50"
               controls-position="right"
+              aria-label="Top K"
             />
-          </div>
-        </div>
+          </el-form-item>
+
+          <!-- Score 阈值 -->
+          <el-form-item label="Score 阈值">
+            <div class="rsd-threshold-group">
+              <el-slider
+                v-model="draft.score_threshold"
+                class="rsd-slider"
+                :min="0"
+                :max="1"
+                :step="0.01"
+                :show-tooltip="false"
+              />
+              <el-input-number
+                v-model="draft.score_threshold"
+                :min="0"
+                :max="1"
+                :step="0.05"
+                :precision="2"
+                controls-position="right"
+                aria-label="Score 阈值"
+              />
+            </div>
+          </el-form-item>
+        </el-form>
       </div>
     </div>
 
@@ -196,11 +232,11 @@ function save() {
 .rsd-strategy-desc { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; }
 .rsd-strategy-radio { margin-left: 8px; }
 
-/* 参数配置区 */
+/* 参数配置区：仅保留卡片容器，行结构交给 el-form-item */
 .rsd-config-panel {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
-  padding: 16px;
+  padding: 16px 20px 4px;
   background: var(--el-fill-color-lighter);
 }
 .rsd-config-title {
@@ -210,40 +246,30 @@ function save() {
   font-size: 14px;
   font-weight: 600;
   color: var(--el-text-color-primary);
-  margin-bottom: 14px;
+  margin-bottom: 8px;
 }
 .rsd-config-title .el-icon { color: var(--el-color-primary); }
+.rsd-form { max-width: 560px; }
 
-.rsd-config-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 0;
-}
-.rsd-config-row + .rsd-config-row { border-top: 1px solid var(--el-border-color-lighter); }
-.rsd-config-label {
-  flex: 0 0 110px;
-  display: flex;
-  align-items: center;
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
-.rsd-config-control { flex: 1; max-width: 360px; }
+.rsd-control-stack { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.rsd-field-row { display: flex; align-items: center; gap: 12px; }
+.rsd-rerank-select { width: 360px; max-width: 100%; }
+.rsd-alert { width: 100%; }
 
 .rsd-threshold-group {
-  flex: 1;
-  max-width: 360px;
+  width: 360px;
+  max-width: 100%;
   display: flex;
   align-items: center;
   gap: 12px;
 }
-.rsd-threshold-slider { flex: 1; }
 .rsd-weight-group {
-  flex: 1;
-  max-width: 360px;
+  width: 360px;
+  max-width: 100%;
   display: flex;
   align-items: center;
   gap: 12px;
 }
+.rsd-slider { flex: 1; }
 .rsd-weight-label { flex: none; font-size: 12px; color: var(--el-text-color-secondary); }
 </style>

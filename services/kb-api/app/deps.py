@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, Header, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from kb_common.database import short_session
-from kb_common.security import decode_jwt
+from kb_common.oidc import authenticate, enabled
 from kb_common.models import User, ApiKey
 import hashlib
 from datetime import datetime, timezone
@@ -16,16 +16,10 @@ bearer = HTTPBearer(auto_error=False)
 # User 模型无 relationship，脱离会话后读取字段是安全的。
 
 # get_current_user 保持不变（仅 JWT，管理类接口用）--保留原实现。
-async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(bearer)) -> User:
-    try:
-        payload = decode_jwt(cred.credentials)
-    except Exception:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "无效凭证")
-    async with short_session() as s:
-        user = await s.get(User, payload["sub"])
-    if not user or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不可用")
-    return user
+async def get_current_user(cred: HTTPAuthorizationCredentials | None = Depends(bearer)) -> User:
+    if not cred or not cred.credentials:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
+    return await authenticate(cred.credentials)
 
 async def get_principal(
     cred: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -33,16 +27,13 @@ async def get_principal(
 ) -> User:
     """JWT 或 API Key 双通道鉴权（检索/问答等程序化读访问用）。
     先试 JWT；若 Bearer token 不是有效 JWT，再按 API Key 查。"""
+    if cred and cred.credentials and not cred.credentials.startswith("kb_"):
+        return await authenticate(cred.credentials)
+    # API keys remain a separate integration mechanism in local mode. In SSO mode
+    # legacy keys could outlive a centrally disabled user, so fail closed until migrated.
+    if enabled():
+        raise HTTPException(401, "统一认证模式仅接受统一身份中心签发的访问令牌")
     async with short_session() as s:
-        # 1) 试 JWT
-        if cred and cred.credentials:
-            try:
-                payload = decode_jwt(cred.credentials)
-                user = await s.get(User, payload["sub"])
-                if user and user.is_active:
-                    return user
-            except Exception:
-                pass  # 不是 JWT，落到 API Key 路径
         # 2) 试 API Key：Bearer token 或 X-API-Key 头都可能是 raw key
         raw = x_api_key or (cred.credentials if cred else None)
         if raw:
