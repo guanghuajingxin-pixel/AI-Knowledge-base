@@ -243,6 +243,12 @@ const routes: RouteRecordRaw[] = [
 
       // ===== 平台管理 =====
       {
+        path: 'settings/api-keys',
+        name: 'PlatformApiKeys',
+        component: () => import('@/views/settings/api-keys.vue'),
+        meta: { title: 'API Key', icon: 'KeyRound', roles: ['super_admin', 'admin'], group: 'config' },
+      },
+      {
         path: 'admin/users',
         name: 'AdminUsers',
         component: () => import('@/views/admin/users.vue'),

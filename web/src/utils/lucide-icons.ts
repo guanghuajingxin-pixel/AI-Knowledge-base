@@ -7,14 +7,14 @@
  */
 import {
   BadgeCheck, ChartLine, ChevronDown, CircleHelp, Clock, Cpu, Download, EyeOff,
-  FolderOpen, Gauge, Library, ListTodo, MessageCircle, MessagesSquare, Monitor,
+  FolderOpen, Gauge, KeyRound, Library, ListTodo, MessageCircle, MessagesSquare, Monitor,
   Pencil, Plug, Search, Settings, Stamp, User, Users, WandSparkles, Workflow,
 } from '@lucide/vue'
 import type { Component } from 'vue'
 
 export const lucideIconMap: Record<string, Component> = {
   BadgeCheck, ChartLine, ChevronDown, CircleHelp, Clock, Cpu, Download, EyeOff,
-  FolderOpen, Gauge, Library, ListTodo, MessageCircle, MessagesSquare, Monitor,
+  FolderOpen, Gauge, KeyRound, Library, ListTodo, MessageCircle, MessagesSquare, Monitor,
   Pencil, Plug, Search, Settings, Stamp, User, Users, WandSparkles, Workflow,
 }
 

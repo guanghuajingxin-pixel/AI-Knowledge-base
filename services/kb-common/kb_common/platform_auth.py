@@ -4,6 +4,7 @@ X-API-Key is client_id:client_secret. No local copy of secrets or token cache:
 each request checks the current client credentials with the identity provider.
 """
 import httpx
+import re
 from fastapi import HTTPException
 
 from kb_common.config import get_settings
@@ -16,7 +17,8 @@ async def authenticate_api_key(raw: str | None) -> dict:
     cfg = get_settings()
     oidc_config()
     client_id, separator, secret = (raw or "").partition(":")
-    if not separator or not secret or len(raw) > 4096 or client_id not in cfg.oidc_api_clients:
+    managed = bool(re.fullmatch(r"platform-api-[0-9a-f]{32}", client_id))
+    if not separator or not secret or len(raw) > 4096 or (not managed and client_id not in cfg.oidc_api_clients):
         raise HTTPException(401, "无效的平台 API Key")
     url = cfg.oidc_token_url or f"{cfg.oidc_issuer.rstrip('/')}/protocol/openid-connect/token"
     try:
@@ -33,7 +35,10 @@ async def authenticate_api_key(raw: str | None) -> dict:
             raise ValueError("Invalid access token")
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         raise HTTPException(503, "统一鉴权服务暂不可用") from exc
-    return await verify_access_token(token, allowed_clients=(client_id,))
+    claims = await verify_access_token(token, allowed_clients=(client_id,))
+    if managed and claims.get("platform_api") is not True:
+        raise HTTPException(401, "无效的平台应用凭证")
+    return claims
 
 
 def require_api_role(claims: dict, role: str) -> None:

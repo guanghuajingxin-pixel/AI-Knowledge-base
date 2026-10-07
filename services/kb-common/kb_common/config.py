@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 from pathlib import Path
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 仓库根目录（config.py 在 services/kb-common/kb_common/config.py，上三级为仓库根）下的 .env
@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     oidc_web_client_id: str = "knowledge-web"
     oidc_api_clients: list[str] = Field(default_factory=list)  # JSON 数组；平台机器客户端白名单
     oidc_token_url: str = ""  # 可选内部 token endpoint，绝不从调用方输入推导
+    oidc_admin_url: str = ""  # 可选内部 /admin/realms/{realm}
+    oidc_admin_client_id: str = ""
+    oidc_admin_client_secret: SecretStr = SecretStr("")
     jwt_secret: str = "change-me-in-prod"
     jwt_algo: str = "HS256"
     jwt_ttl_minutes: int = 1440

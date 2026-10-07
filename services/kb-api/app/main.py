@@ -170,6 +170,8 @@ app.include_router(document.router)
 app.include_router(search.router)
 from app.routes import open_api
 app.include_router(open_api.router)
+from app.routes import platform_keys
+app.include_router(platform_keys.router)
 app.include_router(settings_route.router)
 app.include_router(knowledge_center.router)
 app.include_router(knowledge_library.router)

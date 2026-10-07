@@ -2,6 +2,14 @@
 
 `POST /api/openapi/v1/knowledge/retrieve` 复用知识库检索实现，支持本地文档库、Dify、RAGFlow。Swagger 位于 `/docs`，OpenAPI 规范位于 `/openapi.json`，认证方案为 `PlatformAPIKey`。
 
+## 前端签发与调用说明
+
+管理员在「平台配置 → API Key」签发、重命名、启停或删除平台应用凭证。完整 Key 仅在创建响应显示一次，列表不会读取密钥。先配置服务端 `OIDC_ADMIN_CLIENT_ID` / `OIDC_ADMIN_CLIENT_SECRET`，并在 Keycloak 创建检索角色与管理服务账号。部署步骤见 [身份中心接入](../../web/api-guide/administration.md)。
+
+「API 调用说明」入口统一改为 VitePress 站点 `/api-guide/`，包括鉴权、知识库检索、解析接口和部署说明。`pnpm build` 自动构建并打包文档。
+
+页面签发的客户端通过签名的 `platform_api=true` 声明及固定应用标识格式识别，无需修改 `OIDC_API_CLIENTS`；以下白名单方案仅用于既有手动集成客户端。
+
 ## 统一凭证与授权
 
 API Key 格式为 `client_id:client_secret`，通过 `X-API-Key` 发送。它是 Keycloak confidential client 凭证的封装，由平台身份中心统一管理，不在知识库或业务数据库重复保存。每个接入应用创建独立 client；同一凭证可调用所有获授权的平台能力。此版本实现知识库检索，其他平台 API 可复用 `kb_common.platform_auth`，并检查各自的资源角色。
