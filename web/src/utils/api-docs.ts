@@ -2,7 +2,7 @@
  * 解析引擎 API 文档入口的地址解析。
  *
  * 两类入口：
- *  - 「API 调用说明」：web/public 自编文档页（含端到端示例），地址固定；
+ *  - 「API 调用说明」：VitePress 文档站（含检索与解析指南），地址固定；
  *  - 「OpenAPI」：Swagger 调试台 {Base}/docs，Base 与「自定义解析」页签
  *    （ParserCustomTab）、处理引擎页（ProcessEngine）共用同一份 localStorage 配置。
  * 后续新增其他 OpenAPI 服务时在此追加。
@@ -26,9 +26,13 @@ export function getParserEngineDocsUrl(): string {
   return `${base.replace(/\/+$/, '')}/docs`
 }
 
-/** 在新浏览器页签打开解析引擎 API 调用说明文档页（Docsify 渲染的静态文档，含端到端示例） */
+/** VitePress 文档站；解析引擎与侧边栏入口共用。 */
+export function openApiGuide(page = ''): void {
+  window.open(`/api-guide/${page ? `${page}.html` : ''}`, '_blank', 'noopener')
+}
+
 export function openParserApiGuide(): void {
-  window.open('/mineru-api-docs.html', '_blank', 'noopener')
+  openApiGuide()
 }
 
 /** 在新浏览器页签打开解析引擎 OpenAPI 文档 */

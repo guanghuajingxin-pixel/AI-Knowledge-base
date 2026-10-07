@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "predev": "node -e \"['vite.config.js','vite.config.d.ts'].forEach(f=>{try{require('fs').rmSync(f)}catch(e){}})\"",
-    "build": "vue-tsc -b && vite build",
+    "predev": "node -e \"['vite.config.js','vite.config.d.ts'].forEach(f=>{try{require('fs').rmSync(f)}catch(e){}})\" && pnpm docs:build",
+    "build": "pnpm docs:build && vue-tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest",
     "test:run": "vitest run",
-    "type-check": "vue-tsc --noEmit"
+    "type-check": "vue-tsc --noEmit",
+    "docs:dev": "vitepress dev api-guide",
+    "docs:build": "vitepress build api-guide"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -37,6 +39,7 @@
     "unplugin-auto-import": "^0.17.5",
     "unplugin-vue-components": "^0.26.0",
     "vite": "^5.2.0",
+    "vitepress": "1.6.4",
     "vitest": "^1.5.0",
     "vue-tsc": "^2.0.6"
   },

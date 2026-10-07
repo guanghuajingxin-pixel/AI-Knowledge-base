@@ -65,3 +65,7 @@ ragflow/
 
 # 临时调试文件
 .tmp_*
+
+# VitePress generated site / cache
+web/public/api-guide/
+web/api-guide/.vitepress/cache/

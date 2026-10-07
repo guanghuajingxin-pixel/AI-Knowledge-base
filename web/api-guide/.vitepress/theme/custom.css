@@ -1,0 +1,10 @@
+:root {
+  --vp-c-brand-1: #2b6bff;
+  --vp-c-brand-2: #2760e6;
+  --vp-c-brand-3: #2256cc;
+  --vp-c-brand-soft: #eef3ff;
+  --vp-font-family-base: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+.dark { --vp-c-brand-1: #80a6ff; --vp-c-brand-soft: rgba(43, 107, 255, .16); }
+.vp-doc th { white-space: nowrap; }
+.vp-doc td { white-space: normal; }
