@@ -15,19 +15,17 @@ const total = ref(0)
 const page = ref(1)
 const size = ref(20)
 
-const roleMap: Record<UserRole, { label: string; type: 'danger' | 'warning' | 'success' | 'info' }> = {
-  super_admin: { label: '超级管理员', type: 'danger' },
-  admin: { label: '管理员', type: 'warning' },
-  editor: { label: '编辑者', type: 'success' },
-  viewer: { label: '查看者', type: 'info' },
-}
-
 const roleOptions: { value: UserRole; label: string }[] = [
   { value: 'super_admin', label: '超级管理员' },
   { value: 'admin', label: '管理员' },
   { value: 'editor', label: '编辑者' },
   { value: 'viewer', label: '查看者' },
 ]
+
+/** 角色是分类不是状态：统一灰色 tag，不做多色区分 */
+function roleLabel(role: UserRole) {
+  return roleOptions.find((o) => o.value === role)?.label ?? role
+}
 
 async function fetchData() {
   loading.value = true
@@ -225,7 +223,7 @@ onMounted(() => { if (authConfig.value?.provider !== 'keycloak') void fetchData(
       </el-table-column>
       <el-table-column label="角色" width="110">
         <template #default="{ row }">
-          <el-tag :type="roleMap[row.role as UserRole].type" size="small">{{ roleMap[row.role as UserRole].label }}</el-tag>
+          <el-tag type="info" size="small">{{ roleLabel(row.role as UserRole) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="90">
@@ -250,27 +248,29 @@ onMounted(() => { if (authConfig.value?.provider !== 'keycloak') void fetchData(
       </el-table-column>
       <el-table-column label="操作" width="220" fixed="right">
         <template #default="{ row }">
-          <el-button link type="primary" size="small" @click="openEdit(row as UserInfo)">编辑</el-button>
-          <el-button link type="primary" size="small" @click="openReset(row as UserInfo)">重置密码</el-button>
-          <el-dropdown trigger="click" @command="(cmd: string | number | object) => handleMoreCommand(String(cmd), row as UserInfo)">
-            <el-button link type="primary" size="small" aria-label="更多操作">
-              更多<el-icon><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item
-                  command="unbind"
-                  divided
-                  :disabled="!(row as UserInfo).dingtalk_binding"
-                  style="color: var(--el-color-danger)"
-                >
-                  解绑钉钉
-                </el-dropdown-item>
-                <el-dropdown-item command="toggle">{{ row.is_active ? '停用账号' : '启用账号' }}</el-dropdown-item>
-                <el-dropdown-item command="delete" style="color: var(--el-color-danger)">删除用户</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <div class="ops">
+            <el-button link type="primary" size="small" @click="openEdit(row as UserInfo)">编辑</el-button>
+            <el-button link type="primary" size="small" @click="openReset(row as UserInfo)">重置密码</el-button>
+            <el-dropdown trigger="click" @command="(cmd: string | number | object) => handleMoreCommand(String(cmd), row as UserInfo)">
+              <el-button link type="primary" size="small" aria-label="更多操作">
+                更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    command="unbind"
+                    divided
+                    :disabled="!(row as UserInfo).dingtalk_binding"
+                    style="color: var(--el-color-danger)"
+                  >
+                    解绑钉钉
+                  </el-dropdown-item>
+                  <el-dropdown-item command="toggle">{{ row.is_active ? '停用账号' : '启用账号' }}</el-dropdown-item>
+                  <el-dropdown-item command="delete" style="color: var(--el-color-danger)">删除用户</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -351,5 +351,17 @@ onMounted(() => { if (authConfig.value?.provider !== 'keycloak') void fetchData(
   color: #909399;
   line-height: 1.6;
   margin-top: 4px;
+}
+/* 操作列：按钮间距交给 flex gap，避免 el-dropdown 包裹层打断 EP 相邻按钮 margin */
+.ops {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ops .el-button + .el-button {
+  margin-left: 0;
+}
+.ops .el-dropdown {
+  vertical-align: middle;
 }
 </style>

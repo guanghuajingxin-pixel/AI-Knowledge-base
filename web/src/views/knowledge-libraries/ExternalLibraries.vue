@@ -3,10 +3,15 @@
  * 知识库（检索抽象层）- RAGFlow / DIFY 知识库镜像管理
  * 仅登记 platform + dataset_id 引用（镜像），供智能体检索选库；
  * 检索策略由抽象层按平台内部决定，本页不支持导入/解析新文档。
+ * 布局遵循 docs/frontend-dev-spec.md §1.5 列表页统一范式（过滤栏/工具栏/表格/分页）。
  */
-import { ref, reactive, computed, onMounted, } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, Edit, Delete, Search, ArrowDown, ArrowRight, Connection, Aim, SetUp, Cpu, QuestionFilled } from '@element-plus/icons-vue'
+import {
+  Search, Plus, RefreshCw, FlaskConical, Pencil, Trash2, ChevronDown, ChevronRight,
+  Blend, SlidersHorizontal, Cpu, Crosshair, TextSearch, CircleHelp,
+} from '@lucide/vue'
+import KgPagination from '@/components/common/KgPagination.vue'
 import {
   listKnowledgeLibraries,
   createKnowledgeLibrary,
@@ -20,52 +25,81 @@ import {
 import { listDifyDatasets } from '@/api/dify'
 import { listRagflowDatasets } from '@/api/ragflow'
 
-// 页签切换：文档库（RAGFlow/DIFY 镜像登记） / 问答库（仅 kb_type=FAQ）
 const props = defineProps<{ platform: LibraryPlatform }>()
-const activeTab = ref('external')
-// 问答库页懒加载，切到该页签时才挂载
-
 
 const PLATFORM_LABEL: Record<LibraryPlatform, string> = {
   dify: 'DIFY',
   ragflow: 'RagFlow',
 }
-const PLATFORM_TAG: Record<LibraryPlatform, 'success' | 'warning'> = {
-  dify: 'success',
-  ragflow: 'warning',
-}
 
 // ===== 列表 =====
 const libraries = ref<KnowledgeLibrary[]>([])
 const loading = ref(false)
-const filterPlatform = computed(() => props.platform)
+const error = ref('')
 
 // 引擎文档数（挂载时拉取引擎库列表做镜像映射，失败降级为 —）
 const docCountMap = ref<Map<string, number>>(new Map())
-
-const filteredLibraries = computed(() =>
-  filterPlatform.value
-    ? libraries.value.filter((l) => l.platform === filterPlatform.value)
-    : libraries.value,
-)
-
-const stats = computed(() => ({
-  total: libraries.value.length,
-  dify: libraries.value.filter((l) => l.platform === 'dify').length,
-  ragflow: libraries.value.filter((l) => l.platform === 'ragflow').length,
-  enabled: libraries.value.filter((l) => l.enabled).length,
-}))
 
 function docCount(row: KnowledgeLibrary): number | null {
   return docCountMap.value.get(`${row.platform}:${row.dataset_id}`) ?? null
 }
 
+// ① 过滤栏：草稿与已应用值分离——输入类回车/点「查询」才生效，下拉变更即查
+const filters = reactive({ keyword: '', enabled: '' })
+const applied = reactive({ keyword: '', enabled: '' })
+const page = ref(1)
+const size = ref(20)
+
+const filteredLibraries = computed(() =>
+  libraries.value.filter((l) => {
+    const kw = applied.keyword.toLowerCase()
+    const hitKw =
+      !kw ||
+      l.name.toLowerCase().includes(kw) ||
+      (l.description || '').toLowerCase().includes(kw) ||
+      l.dataset_id.toLowerCase().includes(kw)
+    const hitEnabled = !applied.enabled || String(l.enabled) === applied.enabled
+    return hitKw && hitEnabled
+  }),
+)
+
+const pagedLibraries = computed(() =>
+  filteredLibraries.value.slice((page.value - 1) * size.value, page.value * size.value),
+)
+
+function search() {
+  applied.keyword = filters.keyword.trim()
+  applied.enabled = filters.enabled
+  page.value = 1
+}
+
+function resetFilters() {
+  filters.keyword = ''
+  filters.enabled = ''
+  search()
+}
+
+function onPageChange(p: number) {
+  page.value = p
+}
+
+function onSizeChange(s: number) {
+  size.value = s
+  page.value = 1
+}
+
 async function loadLibraries() {
   loading.value = true
+  error.value = ''
   try {
-    libraries.value = (await listKnowledgeLibraries()).filter(l => l.library_type !== 'document' && l.platform === props.platform)
+    libraries.value = (await listKnowledgeLibraries()).filter(
+      (l) => l.library_type !== 'document' && l.platform === props.platform,
+    )
+    // 删除/筛选后当前页可能越界，回退到最后一页
+    const maxPage = Math.max(1, Math.ceil(libraries.value.length / size.value))
+    if (page.value > maxPage) page.value = maxPage
   } catch (e: any) {
-    ElMessage.error('加载知识库列表失败：' + (e?.message || e))
+    error.value = e?.message || String(e)
   } finally {
     loading.value = false
   }
@@ -80,6 +114,10 @@ async function loadDocCounts() {
   } catch { /* Optional connector can be offline. */ }
 
   docCountMap.value = map
+}
+
+async function refresh() {
+  await Promise.all([loadLibraries(), loadDocCounts()])
 }
 
 onMounted(() => {
@@ -105,7 +143,7 @@ function openAddDialog() {
   currentId.value = null
   Object.assign(form, {
     name: '',
-    platform: filterPlatform.value || 'ragflow',
+    platform: props.platform,
     dataset_id: '',
     description: '',
     enabled: true,
@@ -442,59 +480,61 @@ function shortSegId(id?: string): string {
 </script>
 
 <template>
-  <div class="kl-page">
-    <el-tabs v-model="activeTab" class="kl-tabs external-tabs">
-      <!-- 页签一：文档库（RAGFlow / DIFY 镜像登记） -->
-      <el-tab-pane :label="`${PLATFORM_LABEL[props.platform]}库`" name="external">
-        <div class="pane-scroll">
-    <!-- 统计卡片 -->
-    <div class="kl-stats">
-      <div class="stat-card">
-        <div class="stat-value">{{ stats.total }}</div>
-        <div class="stat-label">知识库总数</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value stat-dify">{{ stats.dify }}</div>
-        <div class="stat-label">DIFY</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value stat-ragflow">{{ stats.ragflow }}</div>
-        <div class="stat-label">RagFlow</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value stat-enabled">{{ stats.enabled }}</div>
-        <div class="stat-label">已开放检索</div>
-      </div>
-    </div>
+  <div class="kge-page external-libraries">
+    <el-alert
+      v-if="error"
+      :title="`加载知识库列表失败：${error}`"
+      type="error"
+      show-icon
+      closable
+      @close="error = ''"
+    >
+      <el-button size="small" @click="loadLibraries">重试</el-button>
+    </el-alert>
 
-    <!-- 列表 -->
-    <div class="kl-content">
-      <div class="page-intro">
-        统一登记 RAGFlow / DIFY 知识库镜像供智能体检索；检索策略由知识库层按平台自动决定，此处不支持导入或解析新文档。
-      </div>
-      <div class="filter-bar">
-        <div class="filter-actions">
-          <el-button :icon="Search" @click="openTestDialog">检索测试</el-button>
-          <el-button :icon="Refresh" :loading="loading" @click="loadLibraries">刷新</el-button>
+    <div class="content" v-loading="loading">
+      <!-- ① 过滤栏 -->
+      <el-form inline class="filter-bar" @submit.prevent>
+        <el-form-item label="状态">
+          <el-select v-model="filters.enabled" clearable placeholder="全部状态" style="width: 130px" @change="search">
+            <el-option value="true" label="已开放" />
+            <el-option value="false" label="已停用" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="关键词">
+          <el-input
+            v-model="filters.keyword"
+            placeholder="名称 / 描述 / 数据集 ID"
+            clearable
+            style="width: 240px"
+            :prefix-icon="Search"
+            @keyup.enter="search"
+            @clear="search"
+          />
+        </el-form-item>
+        <el-form-item class="filter-actions">
+          <el-button type="primary" @click="search">查询</el-button>
+          <el-button @click="resetFilters">重置</el-button>
+        </el-form-item>
+      </el-form>
+
+      <!-- ② 工具栏：左说明，右操作（主操作唯一 primary） -->
+      <div class="toolbar">
+        <span class="toolbar-hint">
+          镜像登记 {{ PLATFORM_LABEL[props.platform] }} 知识库供智能体检索，文档与解析仍在原平台维护
+        </span>
+        <div class="toolbar-actions">
+          <el-button :icon="FlaskConical" @click="openTestDialog">检索测试</el-button>
+          <el-button :icon="RefreshCw" :loading="loading" @click="refresh">刷新</el-button>
           <el-button type="primary" :icon="Plus" @click="openAddDialog">添加知识库</el-button>
         </div>
       </div>
 
-      <el-table
-        :data="filteredLibraries"
-        v-loading="loading"
-        stripe
-        style="width: 100%"
-        empty-text="暂无知识库，点击「添加知识库」从 RAGFlow / DIFY 选择登记"
-      >
+      <!-- ③ 数据表格（border 开启表头列宽拖拽） -->
+      <el-table :data="pagedLibraries" border size="small">
         <el-table-column prop="name" label="知识库名称" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">
-            <div class="lib-name">
-              <el-tag :type="PLATFORM_TAG[row.platform as LibraryPlatform]" size="small" effect="light" class="type-tag">
-                {{ PLATFORM_LABEL[row.platform as LibraryPlatform] }}
-              </el-tag>
-              <span>{{ row.name }}</span>
-            </div>
+            <span class="lib-name">{{ row.name }}</span>
           </template>
         </el-table-column>
         <el-table-column label="文档数" width="90" align="center">
@@ -522,6 +562,7 @@ function shortSegId(id?: string): string {
             <div class="switch-line">
               <el-switch
                 :model-value="(row as KnowledgeLibrary).enabled"
+                :aria-label="`${(row as KnowledgeLibrary).name}开放检索`"
                 @change="handleToggle(row as KnowledgeLibrary)"
               />
               <span class="switch-text" :class="{ off: !(row as KnowledgeLibrary).enabled }">
@@ -532,18 +573,30 @@ function shortSegId(id?: string): string {
         </el-table-column>
         <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
-            <div class="action-btns">
-              <el-button link type="primary" :icon="Edit" size="small" @click="openEditDialog(row as KnowledgeLibrary)">编辑</el-button>
-              <el-button link type="danger" :icon="Delete" size="small" @click="handleDelete(row as KnowledgeLibrary)">删除</el-button>
-            </div>
+            <el-button link type="primary" :icon="Pencil" size="small" @click="openEditDialog(row as KnowledgeLibrary)">编辑</el-button>
+            <el-button link type="danger" :icon="Trash2" size="small" @click="handleDelete(row as KnowledgeLibrary)">删除</el-button>
           </template>
         </el-table-column>
+        <template #empty>
+          <el-empty v-if="!error" description="暂无知识库" :image-size="72">
+            <template #extra>
+              <span class="empty-hint">点击「添加知识库」，从 {{ PLATFORM_LABEL[props.platform] }} 选择登记</span>
+            </template>
+          </el-empty>
+        </template>
       </el-table>
-    </div>
-        </div>
-      </el-tab-pane>
 
-    </el-tabs>
+      <!-- ④ 分页 -->
+      <KgPagination
+        :page="page"
+        :size="size"
+        :total="filteredLibraries.length"
+        :sizes="[20, 50, 100]"
+        layout="total, sizes, prev, pager, next"
+        @update:page="onPageChange"
+        @update:size="onSizeChange"
+      />
+    </div>
 
     <!-- 新增/编辑弹窗 -->
     <el-dialog
@@ -634,14 +687,14 @@ function shortSegId(id?: string): string {
               <el-tooltip content="点击修改检索策略" placement="top">
                 <span class="rt-mode-chip rt-mode-click" @click="openSettings">
                   {{ modeLabel }}
-                  <el-icon><ArrowRight /></el-icon>
+                  <el-icon><ChevronRight /></el-icon>
                 </span>
               </el-tooltip>
               <el-popover placement="bottom-end" :width="380" trigger="click">
                 <template #reference>
                   <el-button link type="primary" class="rt-scope-btn">
                     {{ scopeLabel }}
-                    <el-icon><ArrowDown /></el-icon>
+                    <el-icon><ChevronDown /></el-icon>
                   </el-button>
                 </template>
                 <div class="rt-scope-pop">
@@ -657,7 +710,6 @@ function shortSegId(id?: string): string {
                       <div v-for="l in libraries" :key="l.id" class="rt-scope-item">
                         <el-checkbox :value="l.id">
                           <span class="rt-scope-name">{{ l.name }}</span>
-                          <el-tag :type="PLATFORM_TAG[l.platform]" size="small" effect="light">{{ PLATFORM_LABEL[l.platform] }}</el-tag>
                           <span v-if="!l.enabled" class="rt-scope-off">已停用</span>
                         </el-checkbox>
                       </div>
@@ -749,7 +801,6 @@ function shortSegId(id?: string): string {
                 class="rt-lib-chip"
                 :class="{ fail: !lb.ok }"
               >
-                <el-tag :type="PLATFORM_TAG[lb.platform]" size="small" effect="light">{{ PLATFORM_LABEL[lb.platform] }}</el-tag>
                 <span class="rt-lib-name" :title="lb.name">{{ lb.name }}</span>
                 <span v-if="lb.ok" class="rt-lib-ok">命中 {{ lb.count }} 段</span>
                 <el-tooltip v-else :content="lb.error" placement="top">
@@ -799,7 +850,7 @@ function shortSegId(id?: string): string {
         <!-- 模式一：混合检索（选中时卡片内展开子设置面板，与引擎检索设置一致） -->
         <div class="rs-card wrap" :class="{ selected: settingsDraft.mode === 'hybrid' }" @click="settingsDraft.mode = 'hybrid'">
           <div class="rs-card-main">
-            <div class="rs-icon"><el-icon><Connection /></el-icon></div>
+            <div class="rs-icon"><el-icon><Blend /></el-icon></div>
             <div class="rs-card-text">
               <div class="rs-card-title">混合检索</div>
               <div class="rs-card-desc">同时使用向量检索和全文检索两种策略进行召回，推荐在需要对句子理解和语义关联性的场景使用，综合效果更优</div>
@@ -813,7 +864,7 @@ function shortSegId(id?: string): string {
                 <!-- 子策略一：权重设置 -->
                 <div class="rs-sub-card" :class="{ selected: settingsDraft.hybridSub === 'weight' }" @click="settingsDraft.hybridSub = 'weight'">
                   <div class="rs-card-main">
-                    <div class="rs-icon sm"><el-icon><SetUp /></el-icon></div>
+                    <div class="rs-icon sm"><el-icon><SlidersHorizontal /></el-icon></div>
                     <div class="rs-card-text">
                       <div class="rs-card-title sm">权重设置</div>
                       <div class="rs-card-desc">通过调整分配的权重，重新排序策略确定是优先进行语义匹配还是关键字匹配</div>
@@ -860,7 +911,7 @@ function shortSegId(id?: string): string {
                   <span class="rs-param-label">
                     Top K
                     <el-tooltip content="召回段落数量" placement="top">
-                      <el-icon class="rs-q"><QuestionFilled /></el-icon>
+                      <el-icon class="rs-q"><CircleHelp /></el-icon>
                     </el-tooltip>
                   </span>
                   <el-input-number v-model="settingsDraft.topK" :min="1" :max="50" size="small" controls-position="right" style="width: 96px" />
@@ -871,7 +922,7 @@ function shortSegId(id?: string): string {
                   <span class="rs-param-label auto">
                     Score 阈值
                     <el-tooltip content="低于该相似度分数的分段将被过滤" placement="top">
-                      <el-icon class="rs-q"><QuestionFilled /></el-icon>
+                      <el-icon class="rs-q"><CircleHelp /></el-icon>
                     </el-tooltip>
                   </span>
                   <el-input-number v-model="settingsDraft.scoreThreshold" :min="0" :max="1" :step="0.01" :disabled="!settingsDraft.scoreEnabled" size="small" controls-position="right" style="width: 96px" />
@@ -885,7 +936,7 @@ function shortSegId(id?: string): string {
         <!-- 模式二：向量检索 -->
         <div class="rs-card" :class="{ selected: settingsDraft.mode === 'vector' }" @click="settingsDraft.mode = 'vector'">
           <div class="rs-card-main">
-            <div class="rs-icon"><el-icon><Aim /></el-icon></div>
+            <div class="rs-icon"><el-icon><Crosshair /></el-icon></div>
             <div class="rs-card-text">
               <div class="rs-card-title">向量检索</div>
               <div class="rs-card-desc">返回与查询 Query 含义相匹配的文本分段，而不是与查询字面意思相匹配的内容。推荐在需要对意图相关性的场景使用</div>
@@ -897,7 +948,7 @@ function shortSegId(id?: string): string {
         <!-- 模式三：全文检索 -->
         <div class="rs-card" :class="{ selected: settingsDraft.mode === 'fulltext' }" @click="settingsDraft.mode = 'fulltext'">
           <div class="rs-card-main">
-            <div class="rs-icon"><el-icon><Search /></el-icon></div>
+            <div class="rs-icon"><el-icon><TextSearch /></el-icon></div>
             <div class="rs-card-text">
               <div class="rs-card-title">全文检索</div>
               <div class="rs-card-desc">索引文档中的所有词汇，并返回包含这些词汇的文本分段。推荐在需要对关键词精确匹配的场景下使用</div>
@@ -915,136 +966,76 @@ function shortSegId(id?: string): string {
 </template>
 
 <style scoped>
-.external-tabs > :deep(.el-tabs__header) { display: none; }
-.kl-page {
-  height: 100%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-/* 页签容器：头部固定，内容区撑满并各自滚动 */
-.kl-tabs {
+/* 列表卡片：撑满剩余高度、内部滚动（kge-page 布局约定） */
+.content {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.kl-tabs :deep(.el-tabs__header) {
-  margin: 0;
-  padding: 8px 20px 0;
-  flex-shrink: 0;
-}
-
-.kl-tabs :deep(.el-tabs__content) {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.kl-tabs :deep(.el-tab-pane) {
-  height: 100%;
-}
-
-/* 引擎镜像页签内部滚动容器（补齐原 .kl-page 的内边距） */
-.pane-scroll {
-  height: 100%;
-  overflow: auto;
-  padding: 16px 20px 20px;
-}
-
-/* 统计卡片 */
-.kl-stats {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 16px;
-  flex-shrink: 0;
-}
-
-.stat-card {
-  flex: 1;
-  background: #fff;
-  border-radius: 8px;
-  padding: 14px 18px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-}
-
-.stat-value {
-  font-size: 24px;
-  font-weight: 700;
-  color: #303133;
-}
-
-.stat-dify { color: #67c23a; }
-.stat-ragflow { color: #f56c6c; }
-.stat-enabled { color: var(--app-brand-blue); }
-
-.stat-label {
-  font-size: 12px;
-  color: #999;
-  margin-top: 4px;
-}
-
-/* 列表 */
-.kl-content {
-  flex: 1;
-  background: #fff;
+  background: var(--el-bg-color);
   border-radius: 8px;
   padding: 16px;
   overflow: auto;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
-.page-intro {
-  font-size: 13px;
-  color: #909399;
+/* ① 过滤栏：查询/重置按钮组靠右（§1.5 范式） */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.filter-bar :deep(.el-form-item) {
   margin-bottom: 12px;
 }
 
-.filter-bar {
+.filter-bar :deep(.filter-actions) {
+  margin-left: auto;
+}
+
+/* ② 工具栏：左说明单行 hint，右操作组 */
+.toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
 }
 
-.filter-label {
+.toolbar-hint {
   font-size: 13px;
-  color: #666;
+  color: var(--el-text-color-secondary);
+  min-width: 0;
 }
 
-.filter-actions {
+.toolbar-actions {
   margin-left: auto;
   display: flex;
-  gap: 8px;
+  gap: 12px;
 }
 
-.filter-actions .el-button + .el-button {
+.toolbar-actions :deep(.el-button + .el-button) {
   margin-left: 0;
 }
 
-.lib-name {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 500;
+.empty-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
-.type-tag {
-  flex-shrink: 0;
+.lib-name {
+  font-weight: 500;
+  color: var(--el-text-color-primary);
 }
 
 .desc {
-  color: #999;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
 .dataset-id {
   font-family: 'Menlo', 'Consolas', monospace;
   font-size: 12px;
-  color: #666;
-  background: #f5f7fa;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
   padding: 2px 6px;
   border-radius: 4px;
 }
@@ -1053,6 +1044,7 @@ function shortSegId(id?: string): string {
   display: flex;
   align-items: center;
   gap: 8px;
+  white-space: nowrap;
 }
 
 .switch-text {
@@ -1062,11 +1054,6 @@ function shortSegId(id?: string): string {
 
 .switch-text.off {
   color: var(--el-color-info);
-}
-
-.action-btns {
-  display: flex;
-  gap: 4px;
 }
 
 /* 表单 */
@@ -1082,7 +1069,7 @@ function shortSegId(id?: string): string {
 
 .form-hint {
   font-size: 12px;
-  color: #999;
+  color: var(--el-text-color-secondary);
   margin-top: 4px;
 }
 
@@ -1105,11 +1092,11 @@ function shortSegId(id?: string): string {
 /* 已登记的知识库置灰不可选 */
 .engine-item-disabled {
   cursor: not-allowed;
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
 }
 
 .engine-item-disabled:hover {
-  background: #fafafa;
+  background: var(--el-fill-color-lighter);
 }
 
 .engine-item-disabled .engine-name,
@@ -1179,11 +1166,11 @@ function shortSegId(id?: string): string {
 
 .rt-mode-chip {
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   border: 1px solid var(--el-border-color);
   border-radius: 6px;
   padding: 3px 10px;
-  background: #fafbfc;
+  background: var(--el-fill-color-extra-light);
 }
 
 .rt-scope-btn {
@@ -1204,7 +1191,7 @@ function shortSegId(id?: string): string {
 
 .rt-input-hint {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 
 /* 弹层内的知识库范围多选 */
@@ -1244,18 +1231,18 @@ function shortSegId(id?: string): string {
 .rt-history-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   margin-right: 8px;
 }
 
 .rt-history-note {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 
 .rt-history-empty {
   font-size: 13px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   padding: 24px 0;
   text-align: center;
 }
@@ -1265,18 +1252,18 @@ function shortSegId(id?: string): string {
   align-items: center;
   gap: 10px;
   padding: 10px 6px;
-  border-bottom: 1px solid #f2f4f7;
+  border-bottom: 1px solid var(--el-border-color-extra-light);
   border-radius: 6px;
   cursor: pointer;
 }
 
 .rt-history-item:hover {
-  background: #f7f9fc;
+  background: var(--el-fill-color-light);
 }
 
 .rt-history-mode {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   flex-shrink: 0;
 }
 
@@ -1284,7 +1271,7 @@ function shortSegId(id?: string): string {
   flex: 1;
   min-width: 0;
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1292,7 +1279,7 @@ function shortSegId(id?: string): string {
 
 .rt-history-time {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   flex-shrink: 0;
 }
 
@@ -1308,13 +1295,13 @@ function shortSegId(id?: string): string {
 .rt-section-title {
   font-size: 15px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 
 .rt-settings-grid {
   display: grid;
   grid-template-columns: 1.3fr 1fr 1fr 1fr;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   overflow: hidden;
   margin-top: 10px;
@@ -1323,8 +1310,8 @@ function shortSegId(id?: string): string {
 
 .rt-setting {
   padding: 8px 12px;
-  border-left: 1px solid #ebeef5;
-  background: #fafbfc;
+  border-left: 1px solid var(--el-border-color-lighter);
+  background: var(--el-fill-color-extra-light);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -1336,18 +1323,18 @@ function shortSegId(id?: string): string {
 
 .rt-setting-label {
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 
 .rt-setting-val {
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   line-height: 24px;
 }
 
 .rt-settings-note {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   margin-top: 6px;
   flex-shrink: 0;
 }
@@ -1365,20 +1352,20 @@ function shortSegId(id?: string): string {
   gap: 10px;
   position: sticky;
   top: 0;
-  background: #fff;
+  background: var(--el-bg-color);
   padding: 4px 0;
   z-index: 1;
 }
 
 .rt-results-note {
   font-size: 12px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
 }
 
 .rt-elapsed {
   margin-left: auto;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1394,22 +1381,22 @@ function shortSegId(id?: string): string {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 16px;
   padding: 3px 10px;
   font-size: 12px;
-  background: #fafbfc;
+  background: var(--el-fill-color-extra-light);
   max-width: 100%;
 }
 
 .rt-lib-chip.fail {
-  border-color: #fbc4c4;
-  background: #fef0f0;
+  border-color: var(--el-color-danger-light-7);
+  background: var(--el-color-danger-light-9);
 }
 
 .rt-lib-name {
   font-weight: 500;
-  color: #303133;
+  color: var(--el-text-color-primary);
   max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1432,18 +1419,18 @@ function shortSegId(id?: string): string {
 
 .rt-empty {
   font-size: 13px;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   padding: 40px 0;
   text-align: center;
 }
 
 /* 命中分段卡片 */
 .rt-hit {
-  border: 1px solid #eef0f3;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px;
   padding: 12px 16px;
   margin-top: 10px;
-  background: #fff;
+  background: var(--el-bg-color);
 }
 
 .rt-hit-head {
@@ -1455,7 +1442,7 @@ function shortSegId(id?: string): string {
 
 .rt-rank {
   background: var(--el-color-primary);
-  color: #fff;
+  color: var(--el-color-white);
   font-weight: 700;
   font-size: 12px;
   padding: 2px 8px;
@@ -1465,8 +1452,8 @@ function shortSegId(id?: string): string {
 
 .rt-hit-lib {
   font-size: 12px;
-  color: #909399;
-  border: 1px solid #ebeef5;
+  color: var(--el-text-color-secondary);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 4px;
   padding: 1px 6px;
   flex-shrink: 0;
@@ -1481,7 +1468,7 @@ function shortSegId(id?: string): string {
   min-width: 0;
   font-size: 13.5px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1498,7 +1485,7 @@ function shortSegId(id?: string): string {
   width: 72px;
   height: 6px;
   border-radius: 3px;
-  background: #eef0f3;
+  background: var(--el-fill-color);
   overflow: hidden;
 }
 
@@ -1510,7 +1497,7 @@ function shortSegId(id?: string): string {
 
 .rt-score-val {
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   font-variant-numeric: tabular-nums;
   min-width: 52px;
   text-align: right;
@@ -1518,7 +1505,7 @@ function shortSegId(id?: string): string {
 
 .rt-hit-content {
   font-size: 13px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1536,7 +1523,7 @@ function shortSegId(id?: string): string {
   align-items: center;
   gap: 14px;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   margin-top: 8px;
 }
 
@@ -1615,7 +1602,7 @@ function shortSegId(id?: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #e8f3ff;
+  background: var(--el-color-primary-light-9);
   color: var(--el-color-primary);
   font-size: 18px;
 }
@@ -1629,7 +1616,7 @@ function shortSegId(id?: string): string {
 .rs-card-title {
   font-size: 14.5px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
   margin-bottom: 2px;
 }
 
@@ -1639,7 +1626,7 @@ function shortSegId(id?: string): string {
 
 .rs-card-desc {
   font-size: 12.5px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   line-height: 1.55;
 }
 
@@ -1648,11 +1635,11 @@ function shortSegId(id?: string): string {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  border: 1.5px solid #c0c6d1;
+  border: 1.5px solid var(--el-border-color);
   flex-shrink: 0;
   margin-top: 2px;
   position: relative;
-  background: #fff;
+  background: var(--el-bg-color);
 }
 
 .rs-radio.on {
@@ -1679,8 +1666,8 @@ function shortSegId(id?: string): string {
 /* 混合检索展开的子设置面板（嵌入选中卡片内部，占满整行） */
 .rs-sub-panel {
   flex-basis: 100%;
-  background: #fff;
-  border: 1px solid #e3edfd;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-color-primary-light-8);
   border-radius: 10px;
   padding: 12px;
   margin: 2px 0 0;
@@ -1697,7 +1684,7 @@ function shortSegId(id?: string): string {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  background: #fff;
+  background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
   padding: 10px 12px;
@@ -1745,7 +1732,7 @@ function shortSegId(id?: string): string {
 
 .rs-param-label {
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   width: 92px;
   flex-shrink: 0;
   display: inline-flex;
@@ -1759,7 +1746,7 @@ function shortSegId(id?: string): string {
 
 .rs-param-val {
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular);
   width: 36px;
   text-align: right;
   flex-shrink: 0;
@@ -1772,7 +1759,7 @@ function shortSegId(id?: string): string {
 }
 
 .rs-q {
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   font-size: 13px;
   cursor: help;
 }

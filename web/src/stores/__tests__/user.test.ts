@@ -4,7 +4,7 @@ import { useUserStore } from '../user'
 import { sso } from '@/auth/session'
 
 describe('useUserStore', () => {
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => { vi.restoreAllMocks() })
   beforeEach(() => {
     setActivePinia(createPinia())
     localStorage.clear()

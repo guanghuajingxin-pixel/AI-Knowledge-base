@@ -698,6 +698,8 @@ p, .hint { color: #909399; font-size: 13px; }
 .step-segment :deep(.retrieval-settings) { margin-top: 16px; }
 .step-segment .config-form { margin-top: 16px; }
 :global(.library-config-dialog .el-dialog__body) { max-height: calc(85vh - 120px); overflow-y: auto; }
+/* 步骤条：当前选中步骤圆圈实心（品牌蓝填充），未选中保持空心 */
+:global(.library-config-dialog .el-steps--simple .el-step__head.is-process .el-step__icon) { background-color: var(--el-color-primary); border-color: var(--el-color-primary); }
 .el-alert { margin-bottom: 16px; }
 .hint { margin-left: 8px; }
 .chunk { border: 1px solid #ebeef5; border-radius: 8px; padding: 16px; margin-bottom: 12px; }

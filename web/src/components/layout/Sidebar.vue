@@ -153,10 +153,12 @@ const configMenuItems = computed(() =>
   }),
 )
 
-// 父分组展开状态（默认展开）
+// 父分组展开状态（未设置时由 isGroupExpanded 兜底默认展开）
 const expandedGroups = ref<Record<string, boolean>>({})
 function toggleGroup(key: string) {
-  expandedGroups.value[key] = !expandedGroups.value[key]
+  // 基于当前有效显示状态取反：首次点击未写入过的分组也要正确收起，
+  // 不能用 !undefined（= true），否则首次收起需要点两下
+  expandedGroups.value[key] = !isGroupExpanded(key)
 }
 function isGroupExpanded(key: string): boolean {
   if (expandedGroups.value[key] !== undefined) return expandedGroups.value[key]
