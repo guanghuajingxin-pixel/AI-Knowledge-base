@@ -2,10 +2,19 @@
 web/
 # Reference code (large, not a runtime dependency)
 dify/
+ragflow/
+# Runtime data / model weights on the deploy host (never COPYed into images)
+blobs/
+models/
+output/
+xxl-job-admin/
+tools/
+*.sql
 # Docs / specs / style refs
 docs/
 .superpowers/
 风格参考/
+portal/
 # VCS
 .git/
 .gitignore
