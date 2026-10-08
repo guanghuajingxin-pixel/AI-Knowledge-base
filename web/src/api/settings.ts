@@ -255,6 +255,31 @@ export const deleteRagflowProfile = (id: string) =>
 export const enableRagflowProfile = (id: string) =>
   request.put<unknown, { ok: boolean }>(`/settings/ragflow-profiles/${id}/enable`)
 
+// ============ 密钥回显（管理员查看/复制完整密钥） ============
+
+/** 查看 profile 配置的完整 API Key（kind: dify / llm / ragflow / embedding / rerank） */
+export const revealProfileSecret = (kind: 'dify' | 'llm' | 'ragflow' | 'embedding' | 'rerank', profileId: string) =>
+  request.get<unknown, { api_key: string }>(`/settings/profile-secret/${kind}/${profileId}`)
+
+/** 查看系统级密钥配置项的完整值（如 mineru_api_key / dingtalk_app_secret） */
+export const revealSettingSecret = (key: string) =>
+  request.get<unknown, { value: string }>(`/settings/setting-secret/${key}`)
+
+/** 复制文本到剪贴板（http 内网环境降级 execCommand） */
+export async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try { document.execCommand('copy') } finally { document.body.removeChild(ta) }
+}
+
 // ============ 菜单显示配置（侧边栏功能区菜单显隐） ============
 
 export const getMenuVisibility = () =>

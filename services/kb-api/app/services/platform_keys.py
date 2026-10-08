@@ -147,6 +147,14 @@ async def create_key(name: str, actor_id: str):
             raise
 
 
+async def reveal_key(key_id: UUID):
+    """回显完整密钥 client_id:secret（Keycloak 保存明文 secret，可随时读取）。"""
+    async with admin_session() as admin:
+        row = await get_managed(admin, key_id)
+        secret = (await admin.call('GET', f'clients/{key_id}/client-secret'))['value']
+        return {'client_id': row['clientId'], 'raw_key': f"{row['clientId']}:{secret}"}
+
+
 async def update_key(key_id: UUID, *, name=None, enabled=None):
     async with admin_session() as admin:
         row = await get_managed(admin, key_id)

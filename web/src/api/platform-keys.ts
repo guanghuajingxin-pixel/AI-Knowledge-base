@@ -16,3 +16,7 @@ export const createPlatformKey = (name: string) => request.post<never, PlatformK
 export const updatePlatformKey = (id: string, data: { name?: string; enabled?: boolean }) =>
   request.patch<never, PlatformKey>(`${base}/${id}`, data)
 export const deletePlatformKey = (id: string) => request.delete(`${base}/${id}`)
+
+/** 回显平台 API Key 完整密钥（client_id:secret，仅管理员） */
+export const revealPlatformKeySecret = (id: string) =>
+  request.get<never, { client_id: string; raw_key: string }>(`${base}/${id}/secret`)

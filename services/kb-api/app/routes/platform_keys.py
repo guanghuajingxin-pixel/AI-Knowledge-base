@@ -69,6 +69,13 @@ async def create_key(body: KeyIn, request: Request, response: Response,
     return result
 
 
+@router.get('/{key_id}/secret')
+async def reveal_key_secret(key_id: UUID, response: Response, u=Depends(admin)):
+    """回显平台 API Key 完整密钥（仅管理员；Keycloak client-secret 明文可读取）。"""
+    no_cache(response)
+    return await platform_keys.reveal_key(key_id)
+
+
 @router.patch('/{key_id}', response_model=KeyOut)
 async def update_key(key_id: UUID, body: KeyPatch, request: Request, response: Response,
                      u=Depends(admin), s: AsyncSession = Depends(get_session)):

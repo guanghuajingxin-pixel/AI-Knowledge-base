@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Copy } from '@lucide/vue'
 import PageContainer from '@/components/common/PageContainer.vue'
 import ImageComponentsPanel from '@/components/library/ImageComponentsPanel.vue'
+import SecretKeyCell from '@/components/common/SecretKeyCell.vue'
 import {
   getSettings, setSetting, testLLM, listLlmModels, testDify, testMineru, testDingtalk,
   testEmbedding, testRerank,
@@ -27,6 +29,7 @@ import {
 } from '@/api/settings'
 import { testRagflow, type TestRagflowResult } from '@/api/ragflow'
 import { getMenuVisibility, setMenuVisibility } from '@/api/settings'
+import { revealProfileSecret, revealSettingSecret, copyToClipboard } from '@/api/settings'
 import { useRouter } from 'vue-router'
 
 // ============ 接入配置（功能性） ============
@@ -104,7 +107,7 @@ function openLlmCreate() {
   }
 }
 
-function openLlmEdit(p: LlmProfile) {
+async function openLlmEdit(p: LlmProfile) {
   const preset = llmProviderPresets.find((x) => x.key === p.provider)
   llmDlg.value = {
     visible: true, editingId: p.id, name: p.name, provider: p.provider,
@@ -112,6 +115,8 @@ function openLlmEdit(p: LlmProfile) {
     models: p.models.map((m) => ({ ...m })),
     fetching: false, testing: false, saving: false, testResult: null,
   }
+  // 密钥回填：编辑时展示完整 Key（show-password 承担脱敏）
+  if (p.has_key) llmDlg.value.api_key = await prefillProfileKey('llm', p.id)
 }
 
 function onProviderChange(key: string) {
@@ -240,12 +245,14 @@ function openRfCreate() {
   }
 }
 
-function openRfEdit(p: RagflowProfile) {
+async function openRfEdit(p: RagflowProfile) {
   rfDlg.value = {
     visible: true, editingId: p.id, name: p.name, base_url: p.base_url,
     api_key: '', has_key: p.has_key,
     testing: false, saving: false, testResult: null,
   }
+  // 密钥回填：编辑时展示完整 Key（show-password 承担脱敏）
+  if (p.has_key) rfDlg.value.api_key = await prefillProfileKey('ragflow', p.id)
 }
 
 async function runRfTest() {
@@ -299,7 +306,8 @@ async function removeRfProfile(p: RagflowProfile) {
   await loadRagflowProfiles()
 }
 
-async function enableRfProfile(p: RagflowProfile) {
+async function enableRfProfile(p: RagflowProfile, enable: boolean) {
+  if (!enable) { ElMessage.warning('RAGFlow 连接至少需保留一条生效配置，请先切换到其他配置'); return }
   await enableRagflowProfile(p.id)
   ElMessage.success(`已切换生效：${p.name}`)
   await loadRagflowProfiles()
@@ -341,12 +349,14 @@ function openRrCreate() {
   }
 }
 
-function openRrEdit(p: RerankProfile) {
+async function openRrEdit(p: RerankProfile) {
   rrDlg.value = {
     visible: true, editingId: p.id, name: p.name, api_url: p.api_url,
     api_key: '', has_key: p.has_key, model: p.model, models: [],
     fetching: false, testing: false, saving: false, testResult: null,
   }
+  // 密钥回填：编辑时展示完整 Key（show-password 承担脱敏）
+  if (p.has_key) rrDlg.value.api_key = await prefillProfileKey('rerank', p.id)
 }
 
 async function runRrTest() {
@@ -452,12 +462,14 @@ function openEmCreate() {
   }
 }
 
-function openEmEdit(p: EmbeddingProfile) {
+async function openEmEdit(p: EmbeddingProfile) {
   emDlg.value = {
     visible: true, editingId: p.id, name: p.name, api_url: p.api_url,
     api_key: '', has_key: p.has_key, model: p.model, models: [],
     fetching: false, testing: false, saving: false, testResult: null,
   }
+  // 密钥回填：编辑时展示完整 Key（show-password 承担脱敏）
+  if (p.has_key) emDlg.value.api_key = await prefillProfileKey('embedding', p.id)
 }
 
 /** 拉取模型列表：Embedding 的服务地址就是 OpenAI 兼容 base（含 /v1） */
@@ -529,7 +541,8 @@ async function removeEmProfile(p: EmbeddingProfile) {
   await loadEmbeddingProfiles()
 }
 
-async function enableEmProfile(p: EmbeddingProfile) {
+async function enableEmProfile(p: EmbeddingProfile, enable: boolean) {
+  if (!enable) { ElMessage.warning('Embedding 向量模型至少需保留一条生效配置，请先切换到其他配置'); return }
   await enableEmbeddingProfile(p.id)
   ElMessage.success(`已切换生效：${p.name}`)
   await loadEmbeddingProfiles()
@@ -574,6 +587,8 @@ onMounted(async () => {
     loadEmbeddingProfiles(),
   ])
   form.value = settings
+  // 密钥回填：MinerU Key 展示完整值（show-password 承担脱敏）
+  void prefillMineruKey()
 })
 
 async function save(k: string) {
@@ -588,10 +603,45 @@ async function save(k: string) {
     await setSetting({ key: k, value: item.value })
     form.value = await getSettings()
     if (k === 'site_name' || k === 'site_logo') window.dispatchEvent(new CustomEvent('site-branding-changed'))
+    if (k === 'mineru_api_key') void prefillMineruKey()
     ElMessage.success('已保存')
   } finally {
     saving.value = null
   }
+}
+
+// ============ 密钥回显（查看/复制完整密钥，仅管理员） ============
+
+/** 编辑弹窗打开时拉取 profile 完整 Key 回填表单；失败返回空串（保留留空=不修改语义） */
+async function prefillProfileKey(kind: 'dify' | 'llm' | 'ragflow' | 'embedding' | 'rerank', id: string) {
+  try {
+    return (await revealProfileSecret(kind, id)).api_key
+  } catch {
+    return ''
+  }
+}
+
+/** 复制表单/弹窗中的密钥原文 */
+async function copySecret(v: string, label = 'API Key') {
+  if (!v || v.includes('****')) {
+    ElMessage.warning(`未获取到${label}原文，请稍后重试`)
+    return
+  }
+  try {
+    await copyToClipboard(v)
+    ElMessage.success(`${label}已复制`)
+  } catch {
+    ElMessage.error('复制失败，请手动选择复制')
+  }
+}
+
+/** 系统级 MinerU Key 回填真实值（脱敏显示由 show-password 承担） */
+async function prefillMineruKey() {
+  const item = form.value.mineru_api_key
+  if (!item?.is_set) return
+  try {
+    item.value = (await revealSettingSecret('mineru_api_key')).value
+  } catch { /* 回显失败保留掩码值 */ }
 }
 
 // ============ 站点图标：本地上传 → canvas 裁剪压缩为 128×128 data URL ============
@@ -654,12 +704,14 @@ async function loadProfiles() {
   }
 }
 
-function openProfileDialog(row?: Partial<DifyProfile> & { id?: string }) {
+async function openProfileDialog(row?: Partial<DifyProfile> & { id?: string }) {
   if (row) {
     editingProfile.value = {
       id: row.id ?? null, name: row.name ?? '', base_url: row.base_url ?? '',
       api_key: '', dataset_ids: row.dataset_ids ?? '',
     }
+    // 密钥回填：编辑时展示完整 Key（show-password 承担脱敏）
+    if (row.id && row.api_key) editingProfile.value.api_key = await prefillProfileKey('dify', row.id)
   } else {
     editingProfile.value = { id: null, name: '', base_url: '', api_key: '', dataset_ids: '' }
   }
@@ -719,7 +771,8 @@ async function runProfileTest() {
   }
 }
 
-async function enableProfile(id: string) {
+async function enableProfile(id: string, enable: boolean) {
+  if (!enable) { ElMessage.warning('Dify 连接至少需保留一条生效配置，请先切换到其他配置'); return }
   await enableDifyProfile(id)
   ElMessage.success('已切换生效配置')
   await loadProfiles()
@@ -736,14 +789,19 @@ const dtModal = ref({
   testResult: null as TestDingtalkResult | null,
 })
 
-function openDingtalkModal() {
+async function openDingtalkModal() {
   dtModal.value = {
     visible: true,
-    // Secret 不回显；其余回显已存值
+    // AppSecret 回填完整值（show-password 承担脱敏）；其余回显已存值
     app_key: form.value.dingtalk_app_key?.value || '',
     app_secret: '',
     operator_union_id: form.value.dingtalk_operator_union_id?.value || '',
     testing: false, saving: false, testResult: null,
+  }
+  if (form.value.dingtalk_app_secret?.is_set) {
+    try {
+      dtModal.value.app_secret = (await revealSettingSecret('dingtalk_app_secret')).value
+    } catch { /* 回填失败保留留空=不修改语义 */ }
   }
 }
 
@@ -963,9 +1021,9 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                   </template>
                 </el-table-column>
                 <el-table-column prop="base_url" label="API 端点" min-width="170" show-overflow-tooltip />
-                <el-table-column label="API Key" width="110">
+                <el-table-column label="API Key" min-width="150">
                   <template #default="{ row }">
-                    <span class="mono">{{ row.has_key ? row.api_key : '未配置' }}</span>
+                    <SecretKeyCell kind="llm" :row-id="row.id" :masked="row.api_key" :has-key="!!row.has_key" />
                   </template>
                 </el-table-column>
                 <el-table-column label="生效模型" min-width="220">
@@ -1016,17 +1074,20 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 <el-button size="small" type="primary" @click="openProfileDialog()">+ 新增配置</el-button>
               </div>
               <el-table v-if="profiles.length" :data="profiles" size="small" style="margin-top: 8px">
-                <el-table-column label="生效" width="70">
+                <el-table-column label="生效" width="84">
                   <template #default="{ row }">
-                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableProfile(row.id)">&nbsp;</el-radio>
+                    <el-switch
+                      :model-value="!!row.enabled"
+                      :aria-label="`设为生效 ${row.name}`"
+                      @change="(v: string | number | boolean) => enableProfile(String(row.id), !!v)"
+                    />
                   </template>
                 </el-table-column>
                 <el-table-column prop="name" label="名称" min-width="120" />
                 <el-table-column prop="base_url" label="服务地址" min-width="200" />
-                <el-table-column label="API Key" min-width="140">
+                <el-table-column label="API Key" min-width="150">
                   <template #default="{ row }">
-                    <span v-if="row.api_key" class="mono">{{ row.api_key }}</span>
-                    <span v-else class="muted">未设置</span>
+                    <SecretKeyCell kind="dify" :row-id="row.id" :masked="row.api_key" :has-key="!!row.api_key" />
                   </template>
                 </el-table-column>
                 <el-table-column label="操作" width="120">
@@ -1048,9 +1109,13 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 <el-button size="small" type="primary" @click="openRfCreate">+ 新增配置</el-button>
               </div>
               <el-table v-if="ragflowProfiles.length" :data="ragflowProfiles" size="small" v-loading="ragflowLoading" style="margin-top: 8px">
-                <el-table-column label="生效" width="70">
+                <el-table-column label="生效" width="84">
                   <template #default="{ row }">
-                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableRfProfile(row as RagflowProfile)">&nbsp;</el-radio>
+                    <el-switch
+                      :model-value="!!row.enabled"
+                      :aria-label="`设为生效 ${row.name}`"
+                      @change="(v: string | number | boolean) => enableRfProfile(row as RagflowProfile, !!v)"
+                    />
                   </template>
                 </el-table-column>
                 <el-table-column prop="name" label="名称" min-width="140">
@@ -1060,10 +1125,9 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                   </template>
                 </el-table-column>
                 <el-table-column prop="base_url" label="服务地址" min-width="220" show-overflow-tooltip />
-                <el-table-column label="API Key" min-width="110">
+                <el-table-column label="API Key" min-width="150">
                   <template #default="{ row }">
-                    <span v-if="row.has_key" class="mono">{{ row.api_key }}</span>
-                    <span v-else class="muted">未设置</span>
+                    <SecretKeyCell kind="ragflow" :row-id="row.id" :masked="row.api_key" :has-key="!!row.has_key" />
                   </template>
                 </el-table-column>
                 <el-table-column label="操作" width="110">
@@ -1085,9 +1149,13 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 <el-button size="small" type="primary" @click="openEmCreate">+ 新增配置</el-button>
               </div>
               <el-table v-if="embeddingProfiles.length" :data="embeddingProfiles" size="small" v-loading="embeddingLoading" style="margin-top: 8px">
-                <el-table-column label="生效" width="70">
+                <el-table-column label="生效" width="84">
                   <template #default="{ row }">
-                    <el-radio :model-value="!!row.enabled" :value="true" :aria-label="`启用 ${row.name}`" @change="enableEmProfile(row as EmbeddingProfile)">&nbsp;</el-radio>
+                    <el-switch
+                      :model-value="!!row.enabled"
+                      :aria-label="`设为生效 ${row.name}`"
+                      @change="(v: string | number | boolean) => enableEmProfile(row as EmbeddingProfile, !!v)"
+                    />
                   </template>
                 </el-table-column>
                 <el-table-column prop="name" label="名称" min-width="140">
@@ -1098,10 +1166,9 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 </el-table-column>
                 <el-table-column prop="api_url" label="服务地址" min-width="200" show-overflow-tooltip />
                 <el-table-column prop="model" label="模型名" min-width="180" show-overflow-tooltip />
-                <el-table-column label="API Key" min-width="110">
+                <el-table-column label="API Key" min-width="150">
                   <template #default="{ row }">
-                    <span v-if="row.has_key" class="mono">{{ row.api_key }}</span>
-                    <span v-else class="muted">免鉴权</span>
+                    <SecretKeyCell kind="embedding" :row-id="row.id" :masked="row.api_key" :has-key="!!row.has_key" />
                   </template>
                 </el-table-column>
                 <el-table-column label="操作" width="110">
@@ -1140,10 +1207,9 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
                 </el-table-column>
                 <el-table-column prop="api_url" label="服务地址" min-width="200" show-overflow-tooltip />
                 <el-table-column prop="model" label="模型名" min-width="170" show-overflow-tooltip />
-                <el-table-column label="API Key" min-width="110">
+                <el-table-column label="API Key" min-width="150">
                   <template #default="{ row }">
-                    <span v-if="row.has_key" class="mono">{{ row.api_key }}</span>
-                    <span v-else class="muted">免鉴权</span>
+                    <SecretKeyCell kind="rerank" :row-id="row.id" :masked="row.api_key" :has-key="!!row.has_key" />
                   </template>
                 </el-table-column>
                 <el-table-column label="操作" width="110">
@@ -1162,6 +1228,7 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           <el-form-item label="MinerU API Key">
             <div class="field-row">
               <el-input v-model="form.mineru_api_key.value" show-password placeholder="未设置" />
+              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(form.mineru_api_key?.value || '')" />
               <el-button :loading="mineruTest.testing" @click="runMineruTest">测试连通性</el-button>
               <el-button type="primary" :loading="saving === 'mineru_api_key'" @click="save('mineru_api_key')">保存</el-button>
             </div>
@@ -1321,7 +1388,12 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           <el-input v-model="llmDlg.base_url" placeholder="https://api.deepseek.com/v1" />
         </el-form-item>
         <el-form-item :required="!llmDlg.editingId" label="API Key">
-          <el-input v-model="llmDlg.api_key" show-password :placeholder="llmDlg.has_key ? '••••••••' : '在此输入您的 API Key'" />
+          <div class="key-field">
+            <el-input v-model="llmDlg.api_key" show-password :placeholder="llmDlg.has_key ? '••••••••' : '在此输入您的 API Key'" />
+            <el-tooltip content="复制 API Key" placement="top">
+              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(llmDlg.api_key)" />
+            </el-tooltip>
+          </div>
           <div v-if="llmDlg.editingId" class="field-hint">留空表示不修改已保存的 Key</div>
         </el-form-item>
         <div class="dlg-actions">
@@ -1375,7 +1447,12 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           <div class="field-hint">Dify 知识库 Service API 端点，需含端口与 /v1，例如 http://127.0.0.1:8088/v1 或 https://dify.example.com/v1</div>
         </el-form-item>
         <el-form-item label="API Key">
-          <el-input v-model="editingProfile.api_key" show-password :placeholder="editingProfile.id ? '••••••••' : 'Dataset API Key，如 dataset-R6qPqf7CfPC0Dbn6uT3LxIKw'" />
+          <div class="key-field">
+            <el-input v-model="editingProfile.api_key" show-password :placeholder="editingProfile.id ? '••••••••' : 'Dataset API Key，如 dataset-R6qPqf7CfPC0Dbn6uT3LxIKw'" />
+            <el-tooltip content="复制 API Key" placement="top">
+              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(editingProfile.api_key)" />
+            </el-tooltip>
+          </div>
         </el-form-item>
         <el-alert
           v-if="profileTest.result?.ok"
@@ -1421,7 +1498,12 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           </div>
         </el-form-item>
         <el-form-item label="API Key（非必填）">
-          <el-input v-model="rrDlg.api_key" show-password :placeholder="rrDlg.has_key ? '••••••••（留空保持不变）' : '内网/自建服务常免鉴权，可留空'" />
+          <div class="key-field">
+            <el-input v-model="rrDlg.api_key" show-password :placeholder="rrDlg.has_key ? '••••••••（留空保持不变）' : '内网/自建服务常免鉴权，可留空'" />
+            <el-tooltip content="复制 API Key" placement="top">
+              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(rrDlg.api_key)" />
+            </el-tooltip>
+          </div>
           <div v-if="rrDlg.editingId && rrDlg.has_key" class="field-hint">留空表示不修改已保存的 Key</div>
         </el-form-item>
         <el-alert
@@ -1464,7 +1546,12 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           </div>
         </el-form-item>
         <el-form-item label="API Key（非必填）">
-          <el-input v-model="emDlg.api_key" show-password :placeholder="emDlg.has_key ? '••••••••（留空保持不变）' : '内网/自建服务常免鉴权，可留空'" />
+          <div class="key-field">
+            <el-input v-model="emDlg.api_key" show-password :placeholder="emDlg.has_key ? '••••••••（留空保持不变）' : '内网/自建服务常免鉴权，可留空'" />
+            <el-tooltip content="复制 API Key" placement="top">
+              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(emDlg.api_key)" />
+            </el-tooltip>
+          </div>
           <div v-if="emDlg.editingId && emDlg.has_key" class="field-hint">留空表示不修改已保存的 Key</div>
         </el-form-item>
         <el-alert
@@ -1495,7 +1582,12 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           <el-input v-model="rfDlg.base_url" placeholder="http://127.0.0.1:9380/api/v1（需含端口与 /api/v1 后缀）" />
         </el-form-item>
         <el-form-item required label="API Key">
-          <el-input v-model="rfDlg.api_key" show-password :placeholder="rfDlg.has_key ? '••••••••（留空保持不变）' : 'RAGFlow API Key（RAGFlow 接口均需认证）'" />
+          <div class="key-field">
+            <el-input v-model="rfDlg.api_key" show-password :placeholder="rfDlg.has_key ? '••••••••（留空保持不变）' : 'RAGFlow API Key（RAGFlow 接口均需认证）'" />
+            <el-tooltip content="复制 API Key" placement="top">
+              <el-button :icon="Copy" text aria-label="复制 API Key" @click="copySecret(rfDlg.api_key)" />
+            </el-tooltip>
+          </div>
           <div v-if="rfDlg.editingId && rfDlg.has_key" class="field-hint">留空表示不修改已保存的 Key</div>
         </el-form-item>
         <el-alert
@@ -1523,11 +1615,16 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
           <el-input v-model="dtModal.app_key" placeholder="钉钉开放平台应用 AppKey" />
         </el-form-item>
         <el-form-item label="AppSecret">
-          <el-input
-            v-model="dtModal.app_secret"
-            show-password
-            :placeholder="form.dingtalk_app_secret?.is_set ? '••••••••' : '钉钉开放平台应用 AppSecret'"
-          />
+          <div class="key-field">
+            <el-input
+              v-model="dtModal.app_secret"
+              show-password
+              :placeholder="form.dingtalk_app_secret?.is_set ? '••••••••' : '钉钉开放平台应用 AppSecret'"
+            />
+            <el-tooltip content="复制 AppSecret" placement="top">
+              <el-button :icon="Copy" text aria-label="复制 AppSecret" @click="copySecret(dtModal.app_secret, 'AppSecret')" />
+            </el-tooltip>
+          </div>
         </el-form-item>
         <el-form-item label="服务账号 union_id（兜底）">
           <el-input v-model="dtModal.operator_union_id" placeholder="具备知识库读权限的用户 UnionId" />
@@ -1564,6 +1661,10 @@ const visibleMenuCount = computed(() => menuConfigItems.value.filter((x) => x.vi
 .card-header { display: flex; align-items: center; justify-content: space-between; }
 .field-row { display: flex; gap: 8px; width: 100%; }
 .field-row .el-input { flex: 1; }
+/* 密钥输入行：输入框占满 + 拷贝按钮 */
+.key-field { display: flex; align-items: center; gap: 4px; width: 100%; }
+.key-field .el-input { flex: 1; }
+.key-field .el-button { flex-shrink: 0; }
 .field-hint { font-size: 12px; color: #909399; margin-top: 4px; }
 /* 站点图标配置 */
 .site-logo-row { display: flex; align-items: center; gap: 16px; }

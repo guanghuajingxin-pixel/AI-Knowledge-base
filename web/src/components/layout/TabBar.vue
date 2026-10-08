@@ -4,6 +4,7 @@ import { useAppStore } from '@/stores/app'
 import { useRoute, useRouter } from 'vue-router'
 import { Close, Expand, Fold } from '@element-plus/icons-vue'
 import { ref, onMounted, onUnmounted } from 'vue'
+import PortalEntry from './portal-entry.vue'
 
 const tabsStore = useTabsStore()
 const appStore = useAppStore()
@@ -95,6 +96,8 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <PortalEntry />
+
     <!-- Context Menu -->
     <Teleport to="body">
       <div
@@ -131,6 +134,7 @@ onUnmounted(() => {
 }
 
 .tab-list {
+  min-width: 0;
   display: flex;
   align-items: flex-end;
   gap: 0;

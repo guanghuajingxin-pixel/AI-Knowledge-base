@@ -55,6 +55,43 @@ def _mask_secret(val: str) -> str:
     return val[:3] + "****" + val[-4:]
 
 
+# ==================== 密钥回显（管理员查看/复制完整密钥） ====================
+
+PROFILE_KIND_MODELS = {
+    "dify": DifyProfile,
+    "llm": LLMProfile,
+    "ragflow": RagflowProfile,
+    "embedding": EmbeddingProfile,
+    "rerank": RerankProfile,
+}
+
+
+@router.get("/profile-secret/{kind}/{profile_id}")
+async def reveal_profile_secret(kind: str, profile_id: str,
+                                u=Depends(require_role("super_admin", "admin")),
+                                s: AsyncSession = Depends(get_session)):
+    """查看模型/连接配置的完整 API Key（仅管理员；profile 表明文存储，列表接口只回脱敏值）。"""
+    model = PROFILE_KIND_MODELS.get(kind)
+    if model is None:
+        raise HTTPException(404, "未知的配置类型")
+    row = await s.get(model, _safe_uuid(profile_id))
+    if not row:
+        raise HTTPException(404, "配置不存在")
+    return {"api_key": getattr(row, "api_key", "") or ""}
+
+
+@router.get("/setting-secret/{key}")
+async def reveal_setting_secret(key: str,
+                                u=Depends(require_role("super_admin", "admin")),
+                                s: AsyncSession = Depends(get_session)):
+    """查看系统级密钥配置项的完整值（仅管理员；settings 表 > .env 回退）。"""
+    if key not in KEYS or not KEYS[key][1]:
+        raise HTTPException(404, "未知的密钥配置项")
+    row = (await s.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
+    val = row.value if row else getattr(get_settings(), key, "")
+    return {"value": val or ""}
+
+
 @router.get("")
 async def get_settings_api(u=Depends(require_role("super_admin", "admin")),
                            s: AsyncSession = Depends(get_session)):

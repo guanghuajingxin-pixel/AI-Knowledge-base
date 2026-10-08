@@ -3,10 +3,11 @@ import { computed, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
 import { ElAlert, ElButton, ElDialog, ElDropdown, ElDropdownItem, ElDropdownMenu, ElEmpty,
   ElForm, ElFormItem, ElIcon, ElInput, ElMessage, ElMessageBox, ElOption, ElSelect,
   ElSwitch, ElTable, ElTableColumn, ElTag, ElTooltip } from 'element-plus'
-import { BookOpen, Copy, Ellipsis, Plus, Search } from '@lucide/vue'
+import { BookOpen, Copy, Ellipsis, Eye, EyeOff, Plus, Search } from '@lucide/vue'
 import KgPagination from '@/components/common/KgPagination.vue'
-import { createPlatformKey, deletePlatformKey, listPlatformKeys, updatePlatformKey,
-  type PlatformKey } from '@/api/platform-keys'
+import { createPlatformKey, deletePlatformKey, listPlatformKeys, revealPlatformKeySecret,
+  updatePlatformKey, type PlatformKey } from '@/api/platform-keys'
+import { copyToClipboard } from '@/api/settings'
 import { openApiGuide } from '@/utils/api-docs'
 
 const rows = ref<PlatformKey[]>([])
@@ -24,6 +25,9 @@ const editId = ref('')
 const name = ref('')
 const secret = ref('')
 const secretDialog = ref(false)
+const secrets = ref<Record<string, string>>({})
+const revealedId = ref('')
+const secretLoadingId = ref('')
 const filtered = computed(() => rows.value.filter(row =>
   (!activeQuery.value || `${row.name} ${row.client_id}`.toLowerCase().includes(activeQuery.value.toLowerCase())) &&
   (!status.value || row.enabled === (status.value === 'enabled'))))
@@ -87,11 +91,37 @@ async function remove(row: PlatformKey) {
   } catch { /* API 层显示具体错误 */ }
   finally { busyId.value = '' }
 }
+async function ensureSecret(row: PlatformKey): Promise<string | null> {
+  const cached = secrets.value[row.id]
+  if (cached) return cached
+  secretLoadingId.value = row.id
+  try {
+    const raw = (await revealPlatformKeySecret(row.id)).raw_key
+    secrets.value[row.id] = raw
+    return raw
+  } catch { return null } finally { secretLoadingId.value = '' }
+}
+async function toggleReveal(row: PlatformKey) {
+  if (revealedId.value === row.id) { revealedId.value = ''; return }
+  const raw = await ensureSecret(row)
+  if (raw) revealedId.value = row.id
+}
+async function copyKey(row: PlatformKey) {
+  const raw = await ensureSecret(row)
+  if (!raw) return
+  try { await copyToClipboard(raw); ElMessage.success('API Key 已复制') }
+  catch { ElMessage.error('复制失败，请手动选择复制') }
+}
+function keyText(row: PlatformKey) {
+  const raw = secrets.value[row.id]
+  if (revealedId.value === row.id && raw) return raw
+  return `${row.client_id}:••••••••`
+}
 async function copy() {
-  try { await navigator.clipboard.writeText(secret.value); ElMessage.success('API Key 已复制') }
+  try { await copyToClipboard(secret.value); ElMessage.success('API Key 已复制') }
   catch { ElMessage.error('无法复制，请选中密钥后手动复制') }
 }
-function closeSecret() { secret.value = ''; secretDialog.value = false }
+function closeSecret() { secret.value = ''; secretDialog.value = false; revealedId.value = '' }
 function formatTime(value: string | null) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
 onMounted(load)
 onDeactivated(closeSecret)
@@ -111,7 +141,20 @@ onBeforeUnmount(closeSecret)
     </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon><el-button link type="primary" @click="load">重新加载</el-button></el-alert>
     <el-table v-loading="isLoading" :data="visibleRows" border class="keys-table">
-      <el-table-column prop="name" label="应用名称" min-width="260" show-overflow-tooltip />
+      <el-table-column prop="name" label="应用名称" min-width="200" show-overflow-tooltip />
+      <el-table-column label="API Key" min-width="250">
+        <template #default="{ row }">
+          <div class="key-cell">
+            <span class="key-text" :title="revealedId === row.id ? secrets[row.id as string] : ''">{{ keyText(row as PlatformKey) }}</span>
+            <el-tooltip :content="revealedId === row.id ? '隐藏密钥' : '显示密钥'" placement="top">
+              <el-button link size="small" :loading="secretLoadingId === row.id" :aria-label="revealedId === row.id ? '隐藏 API Key' : '显示 API Key'" @click="toggleReveal(row as PlatformKey)"><el-icon><EyeOff v-if="revealedId === row.id" /><Eye v-else /></el-icon></el-button>
+            </el-tooltip>
+            <el-tooltip content="复制 API Key" placement="top">
+              <el-button link size="small" :aria-label="`复制 ${row.name} 的 API Key`" @click="copyKey(row as PlatformKey)"><el-icon><Copy /></el-icon></el-button>
+            </el-tooltip>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column prop="client_id" label="应用标识" width="260" show-overflow-tooltip />
       <el-table-column label="权限" width="132"><template #default><el-tag type="info" effect="plain">知识库检索</el-tag></template></el-table-column>
       <el-table-column label="状态" width="132"><template #default="{ row }"><div class="status-cell"><el-switch :model-value="row.enabled" :loading="busyId === row.id" :disabled="!!busyId" :aria-label="`${row.name}启用状态`" @change="toggle(row as PlatformKey)" /><span>{{ row.enabled ? '已启用' : '已停用' }}</span></div></template></el-table-column>
@@ -128,7 +171,7 @@ onBeforeUnmount(closeSecret)
       <template #footer><el-button :disabled="isSaving" @click="dialog = false">取消</el-button><el-button type="primary" :loading="isSaving" @click="save">{{ editId ? '保存' : '签发 Key' }}</el-button></template>
     </el-dialog>
     <el-dialog v-model="secretDialog" title="保存 API Key" width="600px" :close-on-click-modal="false" :close-on-press-escape="false" :show-close="false">
-      <el-alert title="完整密钥仅显示这一次，请复制并妥善保存。关闭后无法再次查看。" type="warning" :closable="false" show-icon />
+      <el-alert title="完整密钥请复制并妥善保存；关闭后仍可在列表中随时查看或复制。" type="warning" :closable="false" show-icon />
       <el-input :model-value="secret" type="textarea" :rows="4" readonly aria-label="新签发的 API Key" class="secret-input" />
       <template #footer><el-button @click="closeSecret">已保存，关闭</el-button><el-button type="primary" :icon="Copy" @click="copy">复制 Key</el-button></template>
     </el-dialog>
@@ -145,6 +188,8 @@ onBeforeUnmount(closeSecret)
 .toolbar { display: flex; justify-content: space-between; margin: 24px 0 16px; }
 .keys-table { margin-top: 16px; min-height: 320px; }
 .status-cell { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+.key-cell { display: flex; gap: 4px; align-items: center; }
+.key-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: Consolas, Monaco, monospace; font-size: 12px; color: var(--el-text-color-regular); }
 .scope-help { margin-left: 8px; }
 .secret-input { margin-top: 16px; }
 .danger-action { color: var(--el-color-danger); }
