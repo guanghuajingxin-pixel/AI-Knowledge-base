@@ -183,7 +183,11 @@ function pollStatus() {
     dtStarting.value = false
     if (!wasRunning) return // 切入时已是 idle 状态，不做完成提示
     if (st?.error) { ElMessage.error(`刷新失败：${st.error}`); return }
-    ElMessage.success(`刷新完成，共 ${st?.folder_count ?? 0} 个文件夹`)
+    if (st?.truncated) {
+      ElMessage.warning(`刷新完成，共 ${st?.folder_count ?? 0} 个文件夹（已达遍历上限，数据可能不完整）`)
+    } else {
+      ElMessage.success(`刷新完成，共 ${st?.folder_count ?? 0} 个文件夹`)
+    }
     load()
   }, 2000)
 }
@@ -266,7 +270,7 @@ onUnmounted(stopPolling)
       </div>
       <span v-if="isDingtalkSelected && dtStatus" class="dt-status">
         <template v-if="dtRefreshing">正在遍历，已获取 {{ dtStatus.done }} 个文件夹…</template>
-        <template v-else-if="dtStatus.folder_count">快照：{{ dtStatus.folder_count }} 个文件夹{{ dtStatus.fetched_at ? `（${dtStatus.fetched_at.replace('T', ' ')}）` : '' }}</template>
+        <template v-else-if="dtStatus.folder_count">快照：{{ dtStatus.folder_count }} 个文件夹{{ dtStatus.fetched_at ? `（${dtStatus.fetched_at.replace('T', ' ')}）` : '' }}{{ dtStatus.truncated ? '，已达遍历上限，数据可能不完整' : '' }}</template>
         <template v-else>暂无快照，请点击「刷新数据」</template>
       </span>
       <!-- 导出/导入收进「更多操作」下拉，减少行内按钮数量；导入项仅编辑角色可见 -->

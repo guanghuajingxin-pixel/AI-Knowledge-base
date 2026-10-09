@@ -142,6 +142,8 @@ export interface DingtalkRefreshStatus {
   running: boolean
   done: number
   error?: string | null
+  /** 遍历触及安全上限被截断，快照可能不完整（父目录文件夹数量会虚记为 0） */
+  truncated?: boolean
   folder_count: number
   fetched_at?: string | null
 }

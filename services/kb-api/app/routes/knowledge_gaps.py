@@ -118,12 +118,18 @@ async def _refresh_dingtalk_folders_task(source_id: int) -> None:
         if src is None:
             return
         state = _refresh_state.setdefault(src.external_id, {})
-        state.update(running=True, done=0, error=None)
+        state.update(running=True, done=0, error=None, truncated=False)
         try:
             await dingtalk_client.sync_runtime_config()
             root = (src.config or {}).get("root_node_id") or src.external_id
             folders = await dingtalk_client.walk_workspace_folders(
                 root, on_progress=lambda n: state.update(done=n))
+            # 触及安全上限即被截断：被丢弃的子文件夹会导致其父目录文件夹数量虚记为 0，
+            # 标记到状态里让前端提示「数据可能不完整」，避免静默错误
+            state["truncated"] = len(folders) >= dingtalk_client.WALK_MAX_FOLDERS
+            if state["truncated"]:
+                logger.warning("钉钉知识库文件夹遍历达到安全上限 %d，快照可能不完整 %s",
+                               dingtalk_client.WALK_MAX_FOLDERS, src.name)
             # 按 node_id 保留已维护的知识Owner，刷新不丢手动维护/批量导入成果
             owners = dict((await s.execute(
                 select(DingtalkFolderStat.node_id, DingtalkFolderStat.owner)
@@ -166,7 +172,7 @@ def start_dingtalk_refresh(loop: asyncio.AbstractEventLoop, source: KnowledgeSou
     state = _refresh_state.setdefault(source.external_id, {})
     if state.get("running"):
         return False
-    state.update(running=True, done=0, error=None)
+    state.update(running=True, done=0, error=None, truncated=False)
     loop.create_task(_refresh_dingtalk_folders_task(source.id))
     return True
 
@@ -205,7 +211,8 @@ async def dingtalk_refresh_status(kb_id: str = Query(..., description="知识源
         .where(DingtalkFolderStat.external_id == kb_id))).one()
     name = src.name if src else ""
     return {"running": bool(state.get("running")), "done": int(state.get("done") or 0),
-            "error": state.get("error"), "folder_count": folder_count,
+            "error": state.get("error"), "truncated": bool(state.get("truncated")),
+            "folder_count": folder_count,
             "fetched_at": fetched_at.isoformat(timespec="seconds") if fetched_at else None,
             "source_name": name}
 

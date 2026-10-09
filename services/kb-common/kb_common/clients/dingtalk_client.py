@@ -374,7 +374,13 @@ async def list_nodes(parent_node_id: str,
     return out
 
 
-async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
+# 全量遍历文件夹数安全上限：防递归失控（如权限异常导致死循环）。
+# 历史默认 5000 曾把「营销军团」等大知识库静默截断——超过上限的文件夹
+# 不落快照，其父目录文件夹数量被错记为 0；真实企业库可达数千~数万级，放宽到 50000。
+WALK_MAX_FOLDERS = 50000
+
+
+async def walk_workspace_folders(root_node_id: str, max_folders: int = WALK_MAX_FOLDERS,
                                  on_progress=None,
                                  operator_union_id: str | None = None) -> list[dict[str, Any]]:
     """递归遍历钉钉知识库，返回全部文件夹及各文件夹直属文档数量。
@@ -384,7 +390,9 @@ async def walk_workspace_folders(root_node_id: str, max_folders: int = 5000,
     - node_id: 文件夹节点 ID（根节点也作为一行返回，path 为 ""）
     - path: 从根开始的文件夹路径（不带前导斜杠），如 "规章制度/研发流程"；根为 ""
     - document_count: 该文件夹直属文档数（不含子文件夹内的文档）
-    max_folders 为安全上限；on_progress(done: int) 在每完成一个文件夹后回调（用于进度展示）。
+    max_folders 为安全上限（达到后停止递归，调用方应据 len(folders) >= max_folders
+    判断是否截断并向用户提示数据可能不完整）；on_progress(done: int) 在每完成一个
+    文件夹后回调（用于进度展示）。
     operator_union_id：按登录用户维度遍历（仅能看到其有权限的节点）；不传回退全局。
     """
     folders: list[dict[str, Any]] = []
