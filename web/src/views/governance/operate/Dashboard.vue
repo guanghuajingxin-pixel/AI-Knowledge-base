@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, computed } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import * as echarts from 'echarts'
+import html2canvas from 'html2canvas'
 import { ElMessage } from 'element-plus'
+import { Download } from '@lucide/vue'
 import {
   getOverview,
   getKnowledgeDistribution,
   getHotDocuments,
   refreshDingtalk,
+  getKnowledgeGapDepartments,
   type OverviewResponse,
   type DistributionItem,
   type HotDocsResponse,
+  type KnowledgeGapDepartment,
+  type KnowledgeGapDepartmentsResponse,
 } from '@/api/operate'
 
 // ============ 数据 ============
@@ -20,8 +25,17 @@ const distError = ref('')
 const distLoading = ref(false)
 const onlyTop10 = ref(true)
 const chartRef = ref<HTMLDivElement>()
+const gapChartRef = ref<HTMLDivElement>()
+const gapDepartments = ref<KnowledgeGapDepartmentsResponse | null>(null)
+const gapLoading = ref(false)
+const gapError = ref('')
 let chartInstance: echarts.ECharts | null = null
+let gapChartInstance: echarts.ECharts | null = null
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+const onWindowResize = () => {
+  chartInstance?.resize()
+  gapChartInstance?.resize()
+}
 
 const COLORS = ['#3B82F6', '#10B981', '#6366F1', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316', '#06B6D4']
 
@@ -40,7 +54,7 @@ async function loadAll() {
   loading.value = true
   try {
     // 三个请求互不依赖，一起并发（原先热门知识串在前两个之后，白等一个来回）
-    const [ov, dist] = await Promise.all([getOverview(), getKnowledgeDistribution(), loadHot()])
+    const [ov, dist] = await Promise.all([getOverview(), getKnowledgeDistribution(), loadHot(), loadGapDepartments()])
     overview.value = ov
     distData.value = dist.items || []
     distLoading.value = !!dist.loading
@@ -48,6 +62,7 @@ async function loadAll() {
     distError.value = dist.error || ''
     await nextTick()
     renderChart()
+    renderGapChart()
     // 统计任务进行中（或某指标仍在加载）时，20 秒后轮询一次
     const stillLoading = !!ov.job?.running || dist.loading || hotData.value.loading
     if (stillLoading) {
@@ -58,6 +73,18 @@ async function loadAll() {
     ElMessage.error(e?.message || '加载运营数据失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadGapDepartments() {
+  gapLoading.value = true
+  gapError.value = ''
+  try {
+    gapDepartments.value = await getKnowledgeGapDepartments()
+  } catch (e: any) {
+    gapError.value = e?.message || '目录覆盖数据加载失败'
+  } finally {
+    gapLoading.value = false
   }
 }
 
@@ -122,10 +149,151 @@ function renderChart() {
   chartInstance.setOption(option, true)
 }
 
+function renderGapChart() {
+  if (!gapChartRef.value || !gapDepartments.value?.items.length) {
+    gapChartInstance?.dispose()
+    gapChartInstance = null
+    return
+  }
+  if (gapChartInstance && gapChartInstance.getDom() !== gapChartRef.value) {
+    gapChartInstance.dispose()
+    gapChartInstance = null
+  }
+  if (!gapChartInstance) gapChartInstance = echarts.init(gapChartRef.value)
+  gapChartInstance.resize()
+  const rows = gapDepartments.value.items
+  gapChartInstance.setOption({
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: (params: any) => {
+        const department = params?.[0]?.axisValue || ''
+        const item = rows.find((row) => row.department === department)
+        if (!item) return department
+        return `${department}<br/>有内容文件夹：${item.covered_folder_count} 个<br/>知识缺失文件夹：${item.missing_folder_count} 个<br/>文件夹总数：${item.expected_folder_count} 个<br/>文件数：${item.uploaded_file_count} 个<br/>覆盖占比：${item.coverage_percent.toFixed(2)}%`
+      },
+    },
+    legend: { top: 0, right: 4, itemWidth: 10, itemHeight: 10, textStyle: { color: '#475569', fontSize: 12 } },
+    grid: { left: 132, right: 20, top: 32, bottom: 20 },
+    xAxis: { type: 'value', minInterval: 1, axisLabel: { color: '#64748B' }, splitLine: { lineStyle: { color: '#E5E8EE' } } },
+    yAxis: {
+      type: 'category',
+      inverse: true,
+      data: rows.map((item) => item.department),
+      axisLabel: { color: '#475569', width: 120, overflow: 'truncate' },
+      axisLine: { show: false },
+      axisTick: { show: false },
+    },
+    series: [
+      { name: '有内容文件夹', type: 'bar', stack: 'folders', barMaxWidth: 18, itemStyle: { color: '#67C23A', borderRadius: [3, 0, 0, 3] }, data: rows.map((item) => item.covered_folder_count) },
+      { name: '知识缺失文件夹', type: 'bar', stack: 'folders', barMaxWidth: 18, itemStyle: { color: '#E6A23C', borderRadius: [0, 3, 3, 0] }, data: rows.map((item) => item.missing_folder_count) },
+    ],
+  }, true)
+}
+
+function formatCoverage(row: KnowledgeGapDepartment) {
+  return `${row.coverage_percent.toFixed(2)}%`
+}
+
+function gapSummary({ columns }: { columns: Array<{ property?: string }> }) {
+  const total = gapDepartments.value?.total
+  const values: Record<string, string> = {
+    department: '合计',
+    expected_folder_count: (total?.expected_folder_count || 0).toLocaleString(),
+    missing_folder_count: (total?.missing_folder_count || 0).toLocaleString(),
+    uploaded_file_count: (total?.uploaded_file_count || 0).toLocaleString(),
+    coverage_percent: formatCoverage(total || {
+      department: '合计', expected_folder_count: 0, missing_folder_count: 0,
+      uploaded_file_count: 0, covered_folder_count: 0, coverage_percent: 0,
+    }),
+  }
+  return columns.map((column) => column.property === 'department'
+    ? values.department
+    : column.property ? values[column.property] || '' : '')
+}
+
+// ============ 部门目录明细导出 ============
+const gapTablePanelRef = ref<HTMLDivElement>()
+const exporting = ref(false)
+
+function downloadBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
+// 导出表格：CSV（带 BOM，Excel 可直接打开），含合计行
+function exportGapCsv() {
+  if (!gapDepartments.value?.items.length) return
+  const header = ['一级部门', '应上传文件夹数', '未上传文件夹数', '目前已上传文件数', '占比']
+  const rows = gapDepartments.value.items.map((r) =>
+    [r.department, r.expected_folder_count, r.missing_folder_count, r.uploaded_file_count, formatCoverage(r)])
+  const total = gapDepartments.value.total
+  if (total) {
+    rows.push(['合计', total.expected_folder_count, total.missing_folder_count,
+               total.uploaded_file_count, formatCoverage(total)])
+  }
+  const escapeCell = (c: string | number) =>
+    /[",\n]/.test(String(c)) ? `"${String(c).replace(/"/g, '""')}"` : String(c)
+  const csv = [header, ...rows].map((cells) => cells.map(escapeCell).join(',')).join('\n')
+  downloadBlob(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }), '部门目录明细.csv')
+  ElMessage.success('已导出表格')
+}
+
+// 导出图片：克隆面板并解除表格固定高度（表格内部滚动会截断数据行），截全量后下载 PNG
+async function exportGapImage() {
+  const panel = gapTablePanelRef.value
+  if (!panel || exporting.value) return
+  exporting.value = true
+  let clone: HTMLElement | null = null
+  try {
+    clone = panel.cloneNode(true) as HTMLElement
+    clone.style.position = 'fixed'
+    clone.style.left = '-9999px'
+    clone.style.top = '0'
+    clone.style.width = `${panel.offsetWidth}px`
+    // 释放 el-table 固定高度相关样式，让全部数据行自然展开
+    const tableRoot = clone.querySelector('.el-table') as HTMLElement | null
+    if (tableRoot) {
+      tableRoot.style.height = 'auto'
+      tableRoot.style.overflow = 'visible'
+    }
+    clone.querySelectorAll<HTMLElement>('.el-scrollbar__wrap').forEach((n) => { n.style.height = 'auto' })
+    clone.querySelectorAll<HTMLElement>('.el-scrollbar__bar, .el-loading-mask').forEach((n) => { n.style.display = 'none' })
+    document.body.appendChild(clone)
+    const canvas = await html2canvas(clone, { scale: 2, backgroundColor: '#fff' })
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+    if (!blob) throw new Error('生成图片失败')
+    downloadBlob(blob, '部门目录明细.png')
+    ElMessage.success('已导出图片')
+  } catch {
+    ElMessage.error('导出图片失败，请重试')
+  } finally {
+    clone?.remove()
+    exporting.value = false
+  }
+}
+
+function onExportCommand(cmd: string | number | object) {
+  if (cmd === 'csv') exportGapCsv()
+  else if (cmd === 'image') exportGapImage()
+}
+
 // ============ 生命周期 ============
 onMounted(() => {
   loadAll()
-  window.addEventListener('resize', () => chartInstance?.resize())
+  window.addEventListener('resize', onWindowResize)
+})
+onUnmounted(() => {
+  if (pollTimer) clearTimeout(pollTimer)
+  window.removeEventListener('resize', onWindowResize)
+  chartInstance?.dispose()
+  gapChartInstance?.dispose()
 })
 
 // ============ 热门知识 Top20（钉钉知识库真实访问统计，后台逐文档扫描） ============
@@ -321,6 +489,53 @@ const ownerStats = [
       </div>
     </div>
 
+    <!-- ============ 部门知识库上传进度（来自知识缺口目录快照） ============ -->
+    <div class="section-title gap-section-title">
+      <span>部门知识库上传进度</span>
+      <span v-if="gapDepartments?.updated_at" class="snapshot-time">目录快照更新于 {{ gapDepartments.updated_at }}</span>
+    </div>
+    <div class="gap-grid">
+      <div class="panel gap-chart-panel" v-loading="gapLoading">
+        <div class="panel-head">
+          <span class="panel-title">部门目录覆盖情况</span>
+          <el-tooltip content="按知识库名称汇总；文件夹数量或文件数任一大于 0 即视为有内容"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip>
+        </div>
+        <div v-if="gapError" class="gap-state"><el-empty :description="gapError" /></div>
+        <div v-else-if="!gapDepartments?.has_snapshot || !gapDepartments.items.length" class="gap-state">
+          <el-empty :description="gapDepartments?.has_snapshot ? '目录快照中暂无一级部门明细' : '暂无目录快照，请先到「知识缺口」刷新钉钉知识库目录'" />
+        </div>
+        <div v-else ref="gapChartRef" class="gap-chart"></div>
+      </div>
+      <div ref="gapTablePanelRef" class="panel gap-table-panel" v-loading="gapLoading">
+        <div class="panel-head">
+          <div class="head-left">
+            <span class="panel-title">部门目录明细</span>
+            <el-tooltip content="占比 = 有内容文件夹数 ÷ 文件夹总数；有内容指文件夹数量或文件数任一大于 0"><el-icon class="q"><QuestionFilled /></el-icon></el-tooltip>
+          </div>
+          <el-dropdown v-if="gapDepartments?.has_snapshot && gapDepartments.items.length" placement="bottom-end" @command="onExportCommand">
+            <el-button size="small" :icon="Download" :loading="exporting">导出<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="csv">导出表格（CSV）</el-dropdown-item>
+                <el-dropdown-item command="image">导出图片（PNG）</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+        <el-table v-if="gapDepartments?.has_snapshot && gapDepartments.items.length" :data="gapDepartments.items" border size="small" height="380" class="gap-table" show-summary :summary-method="gapSummary">
+          <el-table-column prop="department" label="一级部门" min-width="130" show-overflow-tooltip />
+          <el-table-column prop="expected_folder_count" label="应上传文件夹数" width="126" align="center" />
+          <el-table-column prop="missing_folder_count" label="未上传文件夹数" width="126" align="center" />
+          <el-table-column prop="uploaded_file_count" label="目前已上传文件数" width="136" align="center" />
+          <el-table-column prop="coverage_percent" label="占比" width="100" align="right">
+            <template #default="{ row }">{{ formatCoverage(row as KnowledgeGapDepartment) }}</template>
+          </el-table-column>
+        </el-table>
+        <div v-else-if="gapError" class="gap-state"><el-empty :description="gapError" /></div>
+        <div v-else class="gap-state"><el-empty description="暂无部门目录明细" /></div>
+      </div>
+    </div>
+
     <!-- ============ 知识运营成效（模拟数据） ============ -->
     <div class="section-title">
       <span>知识运营成效</span>
@@ -412,6 +627,7 @@ const ownerStats = [
 .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .panel { background: #fff; border: 1px solid #E5E8EE; border-radius: 12px; padding: 18px 20px; box-shadow: 0 1px 3px rgba(16,24,40,.06); }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.panel-head .head-left { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .panel-title { font-size: 15px; font-weight: 600; color: #1F2937; display: flex; align-items: center; gap: 4px; }
 .panel-title .q { color: #9CA3AF; font-size: 14px; cursor: help; }
 .panel-tools { display: flex; align-items: center; gap: 8px; }
@@ -433,6 +649,13 @@ a.hot-title:hover { color: #2563EB; }
 
 .chart { width: 100%; height: 380px; }
 .empty { text-align: center; color: #9CA3AF; font-size: 13px; padding: 40px 0; }
+.gap-section-title { margin-top: 24px; }
+.snapshot-time { margin-left: auto; font-size: 12px; font-weight: 400; color: #909399; }
+.gap-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 16px; }
+.gap-chart-panel, .gap-table-panel { min-width: 0; }
+.gap-chart { width: 100%; height: 380px; }
+.gap-state { height: 380px; display: flex; align-items: center; justify-content: center; }
+.gap-table :deep(.el-table__footer-wrapper td) { background: #F8FAFC; font-weight: 600; color: #1F2937; }
 
 /* 原运营指标（示例数据） */
 .section-title { display: flex; align-items: center; gap: 10px; margin: 28px 0 14px; font-size: 16px; font-weight: 600; color: #1F2937; }
@@ -453,5 +676,6 @@ a.hot-title:hover { color: #2563EB; }
 @media (max-width: 900px) {
   .metric-grid { grid-template-columns: 1fr; }
   .bottom-grid { grid-template-columns: 1fr; }
+  .gap-grid { grid-template-columns: 1fr; }
 }
 </style>

@@ -72,3 +72,22 @@ export interface HotDocsResponse {
 }
 
 export const getHotDocuments = () => request.get<unknown, HotDocsResponse>('/operate/hot-documents')
+
+export interface KnowledgeGapDepartment {
+  department: string
+  expected_folder_count: number
+  missing_folder_count: number
+  uploaded_file_count: number
+  covered_folder_count: number
+  coverage_percent: number
+}
+
+export interface KnowledgeGapDepartmentsResponse {
+  items: KnowledgeGapDepartment[]
+  total: KnowledgeGapDepartment
+  updated_at: string | null
+  has_snapshot: boolean
+}
+
+export const getKnowledgeGapDepartments = () =>
+  request.get<unknown, KnowledgeGapDepartmentsResponse>('/operate/knowledge-gap-departments')

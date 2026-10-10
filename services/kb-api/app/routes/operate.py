@@ -13,6 +13,7 @@ from datetime import datetime, date, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, delete
+from sqlalchemy import func
 
 from kb_common.database import SessionLocal
 from app.deps import require_role
@@ -197,17 +198,37 @@ async def _run_full_stats(trigger: str, include_hot: bool = True) -> None:
         _job["phase"] = None
 
 
+def _parse_dingtalk_time(v) -> datetime | None:
+    """解析钉钉时间字段并转为本地时区。
+
+    钉钉 wiki 节点 API 实测返回 UTC 无秒 ISO 串（如 2026-07-08T18:08Z），
+    兼容毫秒时间戳与带秒/时区偏移的 ISO 串；解析失败返回 None。
+    """
+    if v in (None, ""):
+        return None
+    s = str(v).strip()
+    if s.isdigit():  # 毫秒时间戳
+        try:
+            return datetime.fromtimestamp(int(s) / 1000).astimezone()
+        except (ValueError, OverflowError, OSError):
+            return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.astimezone()  # 无时区信息的串按本地时间解释，统一返回本地时区 aware
+
+
 def _count_month_new(data: list[dict]) -> int:
-    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    """本月新增：按文件创建时间统计（缺失时回退修改时间），跨月界以本地时区为准。"""
+    month_start = datetime.now().astimezone().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     n = 0
     for w in data:
         for f in w.get("files", []):
-            mt = f.get("modified_time") or ""
-            try:
-                if datetime.strptime(mt[:19], "%Y-%m-%dT%H:%M:%S") >= month_start:
-                    n += 1
-            except Exception:
-                pass
+            t = (_parse_dingtalk_time(f.get("created_time"))
+                 or _parse_dingtalk_time(f.get("modified_time")))
+            if t and t >= month_start:
+                n += 1
     return n
 
 
@@ -361,6 +382,63 @@ async def knowledge_distribution(
         "items": items,
         "error": None,
         "loading": bool(dt.is_configured() and _job["running"] and not items),
+    }
+
+
+@router.get("/knowledge-gap-departments")
+async def knowledge_gap_departments(u=Depends(require_role("super_admin", "admin", "editor", "viewer"))):
+    """复用知识缺口列表的目录行，按知识库名称汇总部门知识覆盖情况。"""
+    from kb_common.models import DingtalkFolderStat, KnowledgeSource
+    from app.routes.knowledge_gaps import all_dingtalk_folder_rows
+
+    async with SessionLocal() as s:
+        # 与知识缺口页默认列表共用同一数据函数，确保目录范围与数量口径逐行一致。
+        rows = await all_dingtalk_folder_rows(s)
+        latest = await s.scalar(
+            select(func.max(DingtalkFolderStat.fetched_at))
+            .join(KnowledgeSource, KnowledgeSource.external_id == DingtalkFolderStat.external_id)
+            .where(KnowledgeSource.source_type == "dingtalk_workspace", KnowledgeSource.enabled.is_(True))
+        )
+
+    departments: dict[str, dict] = {}
+    for row in rows:
+        department = row["kb_name"]
+        item = departments.setdefault(department, {
+            "department": department,
+            "expected_folder_count": 0,
+            "missing_folder_count": 0,
+            "uploaded_file_count": 0,
+            "covered_folder_count": 0,
+        })
+        item["expected_folder_count"] += 1
+        document_count = row["document_count"] or 0
+        folder_count = row["folder_count"] or 0
+        item["uploaded_file_count"] += document_count
+        # 文件夹直属子目录数或直属文件数任一大于 0，就视为目录有内容。
+        if folder_count > 0 or document_count > 0:
+            item["covered_folder_count"] += 1
+        else:
+            item["missing_folder_count"] += 1
+
+    items = list(departments.values())
+    for item in items:
+        expected = item["expected_folder_count"]
+        item["coverage_percent"] = round(item["covered_folder_count"] * 100 / expected, 2) if expected else 0
+    items.sort(key=lambda item: (-item["coverage_percent"], item["department"]))
+
+    total = {
+        "department": "合计",
+        "expected_folder_count": sum(item["expected_folder_count"] for item in items),
+        "missing_folder_count": sum(item["missing_folder_count"] for item in items),
+        "uploaded_file_count": sum(item["uploaded_file_count"] for item in items),
+        "covered_folder_count": sum(item["covered_folder_count"] for item in items),
+    }
+    total["coverage_percent"] = round(total["covered_folder_count"] * 100 / total["expected_folder_count"], 2) if total["expected_folder_count"] else 0
+    return {
+        "items": items,
+        "total": total,
+        "updated_at": latest.strftime("%Y-%m-%d %H:%M") if latest else None,
+        "has_snapshot": latest is not None,
     }
 
 

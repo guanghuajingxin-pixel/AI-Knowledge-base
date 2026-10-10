@@ -737,6 +737,7 @@ async def get_all_workspaces_stats() -> list[dict]:
             "url": f.get("url"),
             "category": f.get("category"),
             "extension": f.get("extension"),
+            "created_time": f.get("created_at"),
             "modified_time": f.get("modified_at"),
         })
     return list(stats.values())
