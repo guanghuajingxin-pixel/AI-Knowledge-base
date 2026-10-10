@@ -136,7 +136,7 @@ A1 收集 → A2 补齐 → A3 生成 → A4_WAIT(确认草稿) ─确认→ A5 
 | 流程 key | `cxpslc`（创新评审流程） |
 | 共享台账 | baseId `Y1OQX0akWmlXvb41TjZjp2r58GlDd3mE` / tableId `hERWDMS` |
 
-平台基址 `https://midflow.chinajack.com/mid-flow`。组织信息（一级/二级部门、组织分类）不写死，运行时由 `initializeData` 取，缓存进 `inn_state.initData`。
+平台基址 `https://midflow.chinajack.com`。组织信息（一级/二级部门、组织分类）不写死，运行时由 `initializeData` 取，缓存进 `inn_state.initData`。
 
 ## 对话式创新提案提报
 

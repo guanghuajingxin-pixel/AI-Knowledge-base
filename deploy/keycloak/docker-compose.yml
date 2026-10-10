@@ -15,7 +15,9 @@ services:
       retries: 20
     restart: unless-stopped
   keycloak:
-    image: quay.io/keycloak/keycloak:26.7.4
+    # 老 CPU（无 x86-64-v2，如 Core2 Duo）跑不动上游 EL9 基础镜像，
+    # 用 deploy/keycloak/build/build-on-host.sh 在本机重打的镜像覆盖 KEYCLOAK_IMAGE。
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.7.4}
     command: ["start", "--import-realm"]
     environment:
       KC_DB: postgres
@@ -29,6 +31,8 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-bootstrap-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD}
+      # 默认按容器内存自动开堆，共享老机器上会吃掉十几 G，这里显式收口。
+      JAVA_OPTS: ${KEYCLOAK_JAVA_OPTS:--Xms256m -Xmx1024m -XX:MaxMetaspaceSize=384m}
     ports:
       - "${KEYCLOAK_BIND:-127.0.0.1}:${KEYCLOAK_PORT:-8180}:8080"
     volumes:

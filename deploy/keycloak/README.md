@@ -2,6 +2,9 @@
 
 门户与知识治理专家共用 Keycloak Realm `jack`。账号、密码、启停和登录会话归 Keycloak 管理；业务数据库保留原 User ID、知识归属和钉钉绑定。FAQ 服务也使用同一验签与身份映射，避免子服务接受不同的账号体系。
 
+> 内网机 10.10.166.2 的部署与切换（含老 CPU 镜像、平台 API Key 链路验证、回滚）见 [INTRANET-CUTOVER.md](INTRANET-CUTOVER.md)；`build/` 下的脚本就是那套步骤的可执行版本。上游镜像 `quay.io/keycloak/keycloak:26.7.4` 是 EL9 基线，在无 x86-64-v2 的机器上启动即 `Fatal glibc error`，需用 `build/build-on-host.sh` 重打镜像并以 `KEYCLOAK_IMAGE` 覆盖。
+
+
 ## 本机服务
 
 ```bash
