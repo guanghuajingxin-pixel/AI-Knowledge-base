@@ -3,6 +3,7 @@ import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Clock, CollectionTag, Delete, Document, Download, Filter, FolderOpened, Plus, QuestionFilled, Search } from '@element-plus/icons-vue'
+import { RefreshCw } from '@lucide/vue'
 import { listDocumentLibraries, saveDocumentLibrary, listLibraryDocuments,
   libraryDocumentAction, setDocumentEnabled, deleteLibraryDocument, setDocumentConfig,
   deleteDocumentLibrary, listEmbeddingModels, downloadOriginal, setLibraryDocumentTags,
@@ -389,6 +390,9 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
         <div class="toolbar">
           <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索知识库名称" clearable style="max-width: 320px" />
           <div class="toolbar-spacer" />
+          <el-tooltip content="刷新列表" placement="top">
+            <el-button :icon="RefreshCw" :loading="loading" aria-label="刷新列表" @click="load" />
+          </el-tooltip>
           <el-button type="primary" :icon="Plus" @click="openCreate()">创建知识库</el-button>
         </div>
         <el-table :data="visibleLibraries" border empty-text="暂无文档库，点击创建知识库开始">
@@ -488,6 +492,9 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer) })
             </div>
           </el-popover>
           <el-input v-model="keyword" :prefix-icon="Search" placeholder="搜索文档名称" clearable style="width: 240px" />
+          <el-tooltip content="刷新列表" placement="top">
+            <el-button :icon="RefreshCw" :loading="loading" aria-label="刷新列表" @click="load" />
+          </el-tooltip>
         </div>
         <el-table :data="pagedDocuments" border empty-text="暂无文档，请上传文件" @selection-change="onSelectionChange">
           <el-table-column type="selection" width="42" />

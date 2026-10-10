@@ -90,6 +90,11 @@ function onDocSelected(sel: DocSelection) {
 function onKbSelected(sel: KbSelection) {
   kbSelection.value = sel
   docSelection.value = null
+  // 选择钉钉知识库后立即创建同步源；后端会把首次编目任务放入同步队列。
+  // 选择器先关闭自身，主弹窗在请求成功后关闭，避免用户还要二次点击「确定」。
+  if (importMode.value === 'sync') {
+    void submitKnowledgeSync(sel)
+  }
 }
 
 const handleUploadChange: UploadProps['onChange'] = async (file) => {
@@ -241,26 +246,56 @@ async function handleSyncImport() {
     // 后端创建源时已直跑首次编目：任务进同步队列、文档以「待同步」进列表，由批处理分批同步
     ElMessage.success(`已创建自动同步任务（${sel.nodes.length} 篇文档，分批同步中，可在同步队列查看进度）`)
   } else if (kbSelection.value) {
-    for (const ws of kbSelection.value.workspaces) {
-      await createSource({
-        name: `钉钉知识库 · ${ws.name}`,
-        workspace_id: ws.id,
-        root_node_id: ws.root_node_id,
-        backend_type: 'library',
-        dify_dataset_name: libName,
-        dify_dataset_id: String(libId),
-        delete_policy: 'keep',
-        cron: '*/5 * * * *',
-        enabled: true,
-        pipeline_inputs: {},
-        node_whitelist: [],
-      })
-      // 后端创建源时已直跑首次编目：任务进同步队列、文档以「待同步」进列表，由批处理分批同步
-    }
-    ElMessage.success(`已创建 ${kbSelection.value.workspaces.length} 个自动同步任务（文档将分批进入文档列表，可在同步队列查看进度）`)
+    await submitKnowledgeSync(kbSelection.value)
+    return
   }
   emit('success')
   closeDialog()
+}
+
+async function submitKnowledgeSync(selection: KbSelection) {
+  if (props.libraryId == null || confirming.value) return
+  confirming.value = true
+  const libName = props.libraryName || `文档库 ${props.libraryId}`
+  let created = 0
+  const errors: string[] = []
+  try {
+    for (const ws of selection.workspaces) {
+      try {
+        await createSource({
+          name: `钉钉知识库 · ${ws.name}`,
+          workspace_id: ws.id,
+          root_node_id: ws.root_node_id,
+          backend_type: 'library',
+          dify_dataset_name: libName,
+          dify_dataset_id: String(props.libraryId),
+          delete_policy: 'keep',
+          cron: '*/5 * * * *',
+          enabled: true,
+          pipeline_inputs: {},
+          node_whitelist: [],
+        })
+        // 创建 library 同步源时后端立即编目，逐文档任务进入同步队列。
+        created++
+      } catch (e: any) {
+        errors.push(`${ws.name}：${e?.response?.data?.detail || e?.message || '创建失败'}`)
+      }
+    }
+
+    if (created > 0) {
+      emit('success')
+      closeDialog()
+      if (errors.length) {
+        ElMessage.warning(`已提交 ${created} 个同步任务，${errors.length} 个未提交：${errors[0]}`)
+      } else {
+        ElMessage.success(`已提交 ${created} 个同步任务，进度可在同步队列查看`)
+      }
+    } else {
+      ElMessage.error(`同步任务未能进入队列：${errors[0] || '请重试'}`)
+    }
+  } finally {
+    confirming.value = false
+  }
 }
 
 function reportImportResult(res: { imported: number; failed: number; errors: string[]; documents?: unknown[] }) {
