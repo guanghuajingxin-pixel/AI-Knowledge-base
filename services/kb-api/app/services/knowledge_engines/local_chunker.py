@@ -28,8 +28,8 @@
 - replace_whitespace / remove_urls_emails：文本预处理规则（分段前执行），
   语义与 Dify CleanProcessor 对齐——前者把 3+ 连续换行折叠为 2 个换行、
   2+ 连续空格/制表符（含全角空格）折叠为单空格（保留换行结构，不影响标题
-  识别）；后者删除所有电子邮箱地址与 http(s) 裸 URL（markdown 链接/图片
-  整体占位保护后还原，避免链接文字/图片引用被误删）；
+  识别）；后者删除电子邮箱和 http(s) URL，markdown 超链接保留文字、远程图片保留
+  替代文字，本地图片引用保留以便图片描述增强；
 - enable_children（Dify parent-child 移植，仅 naive 生效）：父块作召回上下文，
   子块是检索单元（向量与词项打分均作用于子块，子块行 parent_id 指向父分段）；
   - parent_mode=paragraph：父块按 delimiter 集合切段（≤ 限长原样保留，段落结构
@@ -38,7 +38,8 @@
   - children_delimiter / children_chunk_token_num：父块内按子分隔符切子块，
     相邻短块合并、超长子块递归细分（Dify subchunk_segmentation 语义）；
   - 子块总是生成（≥1，单子块即父块整体作为检索单元）；
-- auto_keywords / auto_questions：引擎侧生成能力，本地解析不生成，忽略；
+- auto_keywords / processing.auto_questions：历史引擎参数，本地解析不使用；检索增强中的
+  auto_questions 在分段落库时由 chunk_enhancer 单独生成并参与召回；
 - layout_recognize：MinerU 恒做版面识别，该选项保留在配置中但不区分行为。
 
 markdown 清理：剔除 data:image 内联图（base64 会撑爆存储），保留普通图片引用。
@@ -63,7 +64,7 @@ _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 _MULTI_SPACE_RE = re.compile(r"[\t\f\r\x20\u00a0\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]{2,}")
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)]+)\)")
-_MD_IMAGE_RE = re.compile(r"!\[.*?\]\((https?://[^)]+)\)")
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(https?://[^)]+\)")
 _URL_RE = re.compile(r"https?://\S+")
 
 
@@ -74,18 +75,10 @@ def _pre_process(text: str, cfg: dict) -> str:
         text = _MULTI_SPACE_RE.sub(" ", text)
     if cfg.get("remove_urls_emails"):
         text = _EMAIL_RE.sub("", text)
-        # markdown 链接/图片整体占位保护（链接文字本身可能是 URL），删完裸 URL 后还原
-        placeholders: list[str] = []
-
-        def _protect(m: "re.Match[str]") -> str:
-            placeholders.append(m.group(0))
-            return f"\x00md{len(placeholders) - 1}\x00"
-
-        text = _MD_LINK_RE.sub(_protect, text)
-        text = _MD_IMAGE_RE.sub(_protect, text)
+        # 删除目标 URL、保留可读链接/图片文字，避免 URL 留在分段中。
+        text = _MD_IMAGE_RE.sub(lambda m: m.group(1), text)
+        text = _MD_LINK_RE.sub(lambda m: m.group(1), text)
         text = _URL_RE.sub("", text)
-        for i, raw in enumerate(placeholders):
-            text = text.replace(f"\x00md{i}\x00", raw)
     return text
 
 

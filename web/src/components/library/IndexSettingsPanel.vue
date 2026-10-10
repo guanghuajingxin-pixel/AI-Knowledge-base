@@ -327,7 +327,7 @@ defineExpose({validate, getSettings})
 .exp-row { display: flex; align-items: center; gap: 12px; }
 .exp-row.wrap { align-items: flex-start; }
 .exp-row.wrap .exp-label { padding-top: 1px; }
-.exp-label { flex: none; width: 100px; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; font-size: 13px; color: #606266; }
+.exp-label { flex: none; width: 120px; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; font-size: 13px; color: #606266; }
 .exp-label .tip-icon { margin-left: -2px; }
 .req { color: var(--el-color-danger); }
 .exp-field { flex: 1; max-width: 440px; }

@@ -12,6 +12,7 @@ import { fileIcon } from '@/utils/file-icon'
 import { rewriteChunkImages } from '@/utils/chunk-images'
 import { useTabsStore } from '@/stores/tabs'
 import ParsedContentView from '@/components/common/ParsedContentView.vue'
+import ChunkEnhancements from '@/components/library/ChunkEnhancements.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -287,6 +288,7 @@ onMounted(() => { loadMeta(); load() })
             </div>
             <!-- 段落模式：分段号在 meta 标签中；全文父块模式不展示父内容（与解析原文重复） -->
             <div v-if="!fulltextParent" class="chunk-content" v-html="renderChunk(chunk.content)" />
+            <ChunkEnhancements :data="chunk.retrieval_enhancements" />
             <!-- 子分段（父子分段模式）：子块是检索单元，命中后返回父分段上下文；
                  全文父块模式直接平铺全部子分段，段落模式默认收起、点击展开 -->
             <div v-if="chunk.children?.length" class="child-chunks" :class="{main: fulltextParent}">
@@ -304,7 +306,10 @@ onMounted(() => { loadMeta(); load() })
               <template v-if="fulltextParent || expandedChildren[chunk.id]">
                 <div v-for="(child, j) in chunk.children" :key="child.id" class="child-item">
                   <span class="child-index">{{ j + 1 }}</span>
-                  <div class="child-content" v-html="renderChunk(child.content)" />
+                  <div class="child-content-wrap">
+                    <div class="child-content" v-html="renderChunk(child.content)" />
+                    <ChunkEnhancements :data="child.retrieval_enhancements" />
+                  </div>
                 </div>
               </template>
             </div>
@@ -420,6 +425,7 @@ onMounted(() => { loadMeta(); load() })
 .child-item::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--el-color-primary-light-5); }
 .child-item:hover { background: #f8fafd; }
 .child-index { flex: none; min-width: 20px; height: 20px; border-radius: 5px; background: var(--el-fill-color); color: var(--el-text-color-secondary); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; margin-top: 2px; /* 与子块首行对齐 */ }
+.child-content-wrap { flex: 1; min-width: 0; }
 .child-content { flex: 1; min-width: 0; font-size: 13px; line-height: 1.6; color: var(--el-text-color-regular); overflow-wrap: anywhere; }
 .child-content :deep(img) { max-width: 100%; border-radius: 4px; }
 .child-content :deep(table) { border-collapse: collapse; }

@@ -54,6 +54,13 @@ export interface RetrievalTestHit {
   vector_similarity?: number
   rerank_score?: number
   matched_content?: string
+  retrieval_enhancements?: {
+    filename?: string
+    summary?: string
+    questions?: string[]
+    image_captions?: Array<{image: string; caption: string}>
+    errors?: Record<string, string>
+  }
   score: number
   content: string
   document_title: string

@@ -10,6 +10,7 @@ import { listDocumentLibraries } from '@/api/document-library'
 import { retrievalFromConfig } from '@/components/library/index-settings'
 import RetrievalSettingsDialog, { type RetrievalSettings } from './RetrievalSettingsDialog.vue'
 import { rewriteChunkImages } from '@/utils/chunk-images'
+import ChunkEnhancements from '@/components/library/ChunkEnhancements.vue'
 
 // Markdown 渲染：允许 img（文档库命中分段里的 MinerU 图片按命中文档改写为代理 URL）
 const renderMarkdown = (content: string, documentId?: string) => {
@@ -78,6 +79,7 @@ interface UnifiedHit {
   token_similarity?: number
   vector_similarity?: number
   matched_content?: string
+  retrieval_enhancements?: RetrievalTestHit['retrieval_enhancements']
   text: string
   score: number
   document_title: string
@@ -193,7 +195,7 @@ function saveRecord(q: string) {
     score_threshold: settings.score_threshold, rerank: settings.rerank,
     hit_count: hits.value.length, timestamp: Date.now(),
   }
-  records.value = [rec, ...records.value.filter(r => r.query !== q)].slice(0, MAX_RECORDS)
+  records.value = [rec, ...records.value].slice(0, MAX_RECORDS)
   try { localStorage.setItem(recordKey.value, JSON.stringify(records.value)) } catch { /* ignore */ }
 }
 function useRecord(rec: TestRecord) {
@@ -361,6 +363,7 @@ onMounted(async () => {
                   词项 {{ hit.token_similarity?.toFixed(6) ?? '—' }} · 向量 {{ hit.vector_similarity?.toFixed(6) ?? '—' }}
                 </div>
                 <div v-if="scoreFormula(hit)" class="rtp-card-hint">{{ scoreFormula(hit) }}</div>
+                <ChunkEnhancements :data="hit.retrieval_enhancements" />
                 <details v-if="hit.matched_content && hit.matched_content !== hit.text">
                   <summary>查看实际评分的命中子分段</summary>
                   <div class="rtp-hit-content rtp-md" v-html="renderMarkdown(hit.matched_content, hit.document_id)" />

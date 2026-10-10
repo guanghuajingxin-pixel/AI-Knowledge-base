@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps import require_role, get_current_user
 from app.services.knowledge_engines import EngineError, MinerUEngine, MinerUCloudEngine, job_state
 from app.services.knowledge_engines.local_chunker import chunk_markdown
+from app.services.knowledge_engines.chunk_enhancer import enhance_chunk, referenced_image_names
 from kb_common.config import get_settings
 from kb_common.database import get_session
 from kb_common.models import (EmbeddingProfile, KnowledgeLibrary, LibraryChunk,
@@ -226,6 +227,7 @@ def doc_out(doc):
 def chunk_out(c: LibraryChunk) -> dict:
     return {"id": str(c.id), "document_id": str(c.document_id), "content": c.content,
             "available": c.available, "important_keywords": c.important_keywords or [],
+            "retrieval_enhancements": c.retrieval_enhancements or {},
             "position": c.position, "parent_id": str(c.parent_id) if c.parent_id else None}
 
 
@@ -603,6 +605,50 @@ def _processing_for(lib, doc) -> dict:
     return merged
 
 
+def _enhancements_for(lib, doc) -> dict[str, bool]:
+    """文档级检索增强逐项覆盖库级设置；旧配置按界面默认值补齐。"""
+    defaults = {"include_filename": True, "auto_summary": True,
+                "auto_questions": True, "image_caption": True}
+    merged = {**defaults, **((lib.engine_config or {}).get("enhancements") or {})}
+    merged.update((doc.engine_config or {}).get("enhancements") or {})
+    return {key: bool(merged.get(key)) for key in defaults}
+
+
+async def _enhancement_llm_config(s: AsyncSession) -> dict[str, str]:
+    """LLM 运行配置沿用系统设置优先、.env 回退的口径。"""
+    keys = ("llm_base_url", "llm_api_key", "llm_model")
+    rows = (await s.execute(select(Setting).where(Setting.key.in_(keys)))).scalars().all()
+    configured = {row.key: row.value for row in rows}
+    defaults = get_settings()
+    return {key.removeprefix("llm_"): (configured.get(key) or getattr(defaults, key) or "").strip()
+            for key in keys}
+
+
+async def _read_chunk_images(doc, content: str) -> dict[str, bytes]:
+    names = referenced_image_names(content)
+    if not names:
+        return {}
+    from kb_common.clients import minio_client
+
+    def read_images():
+        result = {}
+        for name in names:
+            response = None
+            try:
+                response = minio_client.minio.get_object(
+                    minio_client.RAW, f"{_images_prefix(doc)}/{name}")
+                result[name] = response.read()
+            except Exception:
+                continue
+            finally:
+                if response is not None:
+                    response.close()
+                    response.release_conn()
+        return result
+
+    return await asyncio.to_thread(read_images)
+
+
 def _job_message(job: dict) -> str:
     for f in job.get("files") or []:
         if isinstance(f, dict) and f.get("error"):
@@ -610,17 +656,39 @@ def _job_message(job: dict) -> str:
     return str(job.get("error") or "")
 
 
-async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict, partial: bool = False):
-    """按库分段规则把 markdown 落地为 LibraryChunk（覆盖旧分段）。"""
+async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict,
+                        partial: bool = False, enhancements: dict | None = None,
+                        images: dict[str, bytes] | None = None):
+    """按分段规则落库，并生成独立可查看、参与召回的增强信息。"""
     pieces = chunk_markdown(markdown, processing)
     if not pieces:
         doc.status, doc.progress, doc.message = "FAILED", 0, "解析产物为空，请检查文件内容"
         return
+    enhancements = enhancements or {}
+    images = images or {}
+    llm_cfg = await _enhancement_llm_config(s)
+    targets: list[tuple[int, int | None, str]] = []
+    for index, piece in enumerate(pieces):
+        targets.append((index, None, piece["content"]))
+        targets.extend((index, child_index, child)
+                       for child_index, child in enumerate(piece.get("children") or []))
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def generate(content: str) -> dict:
+        async with semaphore:
+            return await enhance_chunk(content, doc.name, enhancements, images, llm_cfg)
+
+    metadata = await asyncio.gather(*(generate(content) for _, _, content in targets))
+    metadata_by_target = {(parent_index, child_index): result
+                          for (parent_index, child_index, _), result in zip(targets, metadata)}
     await s.execute(delete(LibraryChunk).where(LibraryChunk.document_id == doc.id))
     count = 0
     for position, piece in enumerate(pieces):
         parent = LibraryChunk(document_id=doc.id, content=piece["content"], available=True,
-                              important_keywords=[], position=position)
+                              important_keywords=[],
+                              retrieval_enhancements=metadata_by_target.get((position, None), {}),
+                              position=position)
         s.add(parent)
         count += 1
         if piece["children"]:
@@ -628,6 +696,7 @@ async def _apply_chunks(s: AsyncSession, doc, markdown: str, processing: dict, p
             for child_index, text in enumerate(piece["children"]):
                 s.add(LibraryChunk(document_id=doc.id, parent_id=parent.id, content=text,
                                    available=True, important_keywords=[], position=position,
+                                   retrieval_enhancements=metadata_by_target.get((position, child_index), {}),
                                    child_index=child_index))
     doc.status, doc.progress = "COMPLETED", 1.0
     doc.message = "部分内容解析失败，请检查分段" if partial else ""
@@ -719,7 +788,8 @@ async def _finalize_parse(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncS
         markdown = await invoke(adapter.markdown(job))
     await _store_images(doc, images)
     await _apply_chunks(s, doc, markdown, _processing_for(lib, doc),
-                        partial=str(job.get("status", "")).lower() == "partial")
+                        partial=str(job.get("status", "")).lower() == "partial",
+                        enhancements=_enhancements_for(lib, doc), images=images)
 
 
 async def refresh_state(adapter: "MinerUEngine | MinerUCloudEngine", s: AsyncSession, lib, doc):
@@ -783,7 +853,8 @@ async def _do_parse(s: AsyncSession, library_id: int, doc_id: uuid.UUID):
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             text = raw.decode("gbk", errors="replace")
-        await _apply_chunks(s, doc, text, _processing_for(lib, doc))
+        await _apply_chunks(s, doc, text, _processing_for(lib, doc),
+                            enhancements=_enhancements_for(lib, doc))
         await s.commit()
         return
     file_id = await invoke(adapter.upload(doc.name, raw))
@@ -1026,10 +1097,14 @@ async def chunks(library_id: int, doc_id: uuid.UUID, page: int = Query(1, ge=1),
 @router.put("/{library_id}/documents/{doc_id}/chunks/{chunk_id}")
 async def write_chunk(library_id: int, doc_id: uuid.UUID, body: ChunkIn, chunk_id: str | None = None, s: AsyncSession = Depends(get_session)):
     lib, doc = await chunk_context(s, library_id, doc_id, writing=True)
+    enhancement_data = await enhance_chunk(
+        body.content, doc.name, _enhancements_for(lib, doc),
+        await _read_chunk_images(doc, body.content), await _enhancement_llm_config(s))
     if chunk_id:
         chunk = await _owned_chunk(s, doc, chunk_id)
         chunk.content, chunk.available = body.content, body.available
         chunk.important_keywords = body.important_keywords
+        chunk.retrieval_enhancements = enhancement_data
     else:
         if body.insert_before or body.insert_after:
             ref = await _owned_chunk(s, doc, body.insert_before or body.insert_after)
@@ -1042,7 +1117,8 @@ async def write_chunk(library_id: int, doc_id: uuid.UUID, body: ChunkIn, chunk_i
             position = (await s.execute(select(func.coalesce(func.max(LibraryChunk.position), -1))
                 .where(LibraryChunk.document_id == doc.id, LibraryChunk.parent_id.is_(None)))).scalar_one() + 1
         chunk = LibraryChunk(document_id=doc.id, content=body.content, available=body.available,
-                             important_keywords=body.important_keywords, position=position)
+                             important_keywords=body.important_keywords,
+                             retrieval_enhancements=enhancement_data, position=position)
         s.add(chunk)
         await s.flush()
     doc.chunk_count = await parent_chunk_count(s, doc.id)

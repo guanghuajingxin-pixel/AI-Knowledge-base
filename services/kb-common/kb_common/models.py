@@ -776,6 +776,9 @@ class LibraryChunk(Base):
     content: Mapped[str] = mapped_column(Text)
     available: Mapped[bool] = mapped_column(Boolean, default=True)
     important_keywords: Mapped[list] = mapped_column(JSON, default=list)
+    # 解析时生成的检索增强信息（文件名、摘要、问题、图片描述）；单独保存以便预览，
+    # 检索时再与正文合成，避免把生成内容混入可编辑的原始分段。
+    retrieval_enhancements: Mapped[dict] = mapped_column(JSON, default=dict)
     position: Mapped[int] = mapped_column(Integer, default=0)
     child_index: Mapped[int | None] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

@@ -13,6 +13,7 @@ import httpx
 from sqlalchemy import select
 from kb_common.config import get_settings
 from kb_common.models import LibraryChunk, LibraryDocument, RerankProfile, Setting
+from app.services.knowledge_engines.chunk_enhancer import retrieval_text
 from kb_common.rag.scoring import (cosine, prepare_query, document_tokens,
                                    term_scores, lexical_candidates, blend, apply_rerank, rerank_term_scores)
 
@@ -172,7 +173,8 @@ async def search(session, lib, query, top_k, mode='hybrid', *, document_ids=None
     if not prepared.keywords:
         return []
     weight = {'vector': 1.0, 'fulltext': 0.0}.get(mode, vector_weight)
-    texts = [{'text': c.content, 'title': name, 'keywords': c.important_keywords or []}
+    texts = [{'text': retrieval_text(c.content, c.retrieval_enhancements),
+              'title': name, 'keywords': c.important_keywords or []}
              for c, name in leaves]
     recall_count = max(1024, top_k * 5)
     lexical_ids = await asyncio.to_thread(lexical_candidates, prepared, texts, recall_count) if weight < 1 else []
@@ -209,6 +211,7 @@ async def search(session, lib, query, top_k, mode='hybrid', *, document_ids=None
             'semantic_weight': weight if weight > 0 else vector_weight,
             'token_similarity': token_score, 'vector_similarity': semantic,
             'important_keywords': chunk.important_keywords or [],
+            'retrieval_enhancements': chunk.retrieval_enhancements or {},
             'document_title': name, 'document_id': str(chunk.document_id),
             'segment_id': str(chunk.id), 'parent_segment_id': str(chunk.parent_id or chunk.id)})
     hits.sort(key=lambda h: -h['score'])

@@ -311,8 +311,15 @@ class MinerULocalTests(unittest.TestCase):
         content = pieces[0]['content']
         self.assertNotIn('admin@example.com', content)             # 邮箱删除
         self.assertNotIn('https://example.com/doc', content)       # 裸 URL 删除
-        self.assertIn('![图片](https://cdn.example.com/a.png)', content)  # markdown 图片受保护
-        self.assertIn('[文档](https://docs.example.com/x)', content)      # markdown 链接受保护
+        self.assertNotIn('https://cdn.example.com/a.png', content)  # 图片 URL 删除
+        self.assertNotIn('https://docs.example.com/x', content)     # 超链接 URL 删除
+        self.assertIn('图片', content)                               # 图片替代文字保留
+        self.assertIn('文档', content)                               # 超链接文字保留
+
+    def test_preprocess_remove_urls_keeps_local_image_reference(self):
+        pieces = chunk_markdown('![流程图](images/flow.png)',
+                                {'chunk_method': 'one', 'remove_urls_emails': True})
+        self.assertIn('![流程图](images/flow.png)', pieces[0]['content'])
 
     def test_overlap_carries_tail_sentences(self):
         text = ''.join(f'第{i}句话讲的是内容{"甲" if i % 2 else "乙"}。' for i in range(40))

@@ -34,7 +34,11 @@ export interface DocumentIndexConfig {
 }
 /** 文档库分段：parent_id 为空 = 父分段；children 为该父分段的子分段（父子分段模式下
 子块是检索单元——向量与词项打分均作用于子块，命中后返回父块作上下文）。 */
-export interface LibraryChunk { id: string; content: string; available: boolean; important_keywords: string[]; positions?: number[][]; parent_id?: string | null; children?: LibraryChunk[] }
+export interface ChunkRetrievalEnhancements {
+  filename?: string; summary?: string; questions?: string[]
+  image_captions?: Array<{image: string; caption: string}>; errors?: Record<string, string>
+}
+export interface LibraryChunk { id: string; content: string; available: boolean; important_keywords: string[]; retrieval_enhancements?: ChunkRetrievalEnhancements; positions?: number[][]; parent_id?: string | null; children?: LibraryChunk[] }
 export interface LibraryChunkInput { content: string; available: boolean; important_keywords: string[]; insert_before?: string; insert_after?: string }
 const root = '/document-libraries'
 export const listDocumentLibraries = () => request.get<unknown, DocumentLibrary[]>(root)
